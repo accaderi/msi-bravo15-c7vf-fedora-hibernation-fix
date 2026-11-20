@@ -376,6 +376,29 @@ heaviest GPU app open, for example a video editor with a project loaded.
   in swap does not need to go into the image. Only the free space on the disk
   swap matters, and the script checks it every time.
 
+### Power button and lid
+
+Like on Windows, the power button or closing the lid can hibernate:
+
+System Settings → **Power Management** → "When power button pressed" and/or
+"When laptop lid closed" → **Hibernate**.
+
+- Set it in each profile you use: **On AC Power**, **On Battery**, **On Low
+  Battery** each have their own tab.
+- It uses the same hibernation as the menu entry, so the preparation, the
+  progress screen and the safety cancel all apply.
+- Choose plain **Hibernate**, not *Hybrid sleep* or *Sleep, then hibernate*.
+  Those take a different path in systemd that `hibernate-prepare` does not
+  handle yet, so they would run into the original problems (image does not
+  fit, NVIDIA crash).
+- Lid with external monitors: if "Even when an external monitor is connected"
+  is on, closing the lid hibernates also while you work on external screens.
+  Turn it off if you use the laptop closed.
+- **Sleep (suspend) is not tested** with this fix. The C7VF only offers
+  `s2idle` (`cat /sys/power/mem_sleep`). The screens switching off after a few
+  idle minutes is not sleep; real sleep shows up in
+  `journalctl -k | grep 'PM: suspend'`.
+
 ### Commands
 
 ```bash
