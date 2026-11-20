@@ -1,0 +1,16 @@
+module nvidia_hibernate_local 1.0;
+
+# The NVIDIA open driver (NVreg_UseKernelSuspendNotifiers=1) saves video memory
+# to NVreg_TemporaryFilePath=/var/tmp from inside the systemd-sleep process.
+# Fedora's SELinux policy blocks that, which aborts hibernation with
+# "NVRM: PM hibernate notifier failed".
+
+require {
+	type systemd_sleep_t;
+	type tmp_t;
+	class file { create open read write append getattr setattr unlink };
+	class dir { search getattr write add_name remove_name };
+}
+
+allow systemd_sleep_t tmp_t:file { create open read write append getattr setattr unlink };
+allow systemd_sleep_t tmp_t:dir { search getattr write add_name remove_name };

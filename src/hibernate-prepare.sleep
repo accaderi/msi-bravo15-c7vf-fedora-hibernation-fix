@@ -1,0 +1,7 @@
+#!/bin/bash
+# systemd-sleep hook, installed as /usr/lib/systemd/system-sleep/hibernate-prepare.
+# Runs after every hibernation attempt, also a failed one: turns zram back on
+# and records how much memory the image really needed.
+# ("pre" is done by hibernate-prepare.service, which has a longer time limit.)
+[ "$1" = post ] && [ "$2" = hibernate ] && exec /usr/local/sbin/hibernate-prepare post
+exit 0

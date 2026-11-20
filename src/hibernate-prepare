@@ -1,0 +1,464 @@
+#!/bin/bash
+# hibernate-prepare: make Linux hibernation fit in RAM, or cancel it safely.
+#
+# The kernel builds the hibernation image as a copy of memory *inside RAM*
+# before writing it to swap, so the copy can be at most about half of RAM.
+# Two things break that on laptops like the MSI Bravo 15 C7VF:
+#   - zram (compressed swap in RAM): memory the kernel "swaps out" to make
+#     room stays in RAM, so nothing is freed.
+#   - GPU drivers add memory after the kernel has sized the image (measured
+#     ~1.7-2.8 GB with an AMD iGPU + NVIDIA dGPU), and then it no longer fits.
+# When the image does not fit, hibernation aborts, and the NVIDIA driver can
+# crash while waking back up (black screen, hard power-off needed).
+#
+# What this script does:
+#   pre        turn zram off, push memory to the disk swap until the image
+#              will fit with room for the GPU growth, set the kernel's image
+#              size target, unload drivers that hang the power-off.
+#              Cancels hibernation (exit 1 + desktop notification) if it
+#              cannot fit or the swap is too small.
+#   post       reload those drivers, turn zram back on, learn the real GPU
+#              growth from the kernel log.
+#   calibrate  run a full test hibernation that restores at once instead of
+#              powering off, and learn from it.
+#   status     show the numbers, change nothing.
+#
+# Runs as root. "pre" is started by hibernate-prepare.service, "post" by the
+# systemd-sleep hook /usr/lib/systemd/system-sleep/hibernate-prepare.
+
+set -u
+
+# ---- settings (override in /etc/hibernate-prepare.conf) ----------------------
+DEFAULT_GROWTH_MIB=3072   # GPU growth assumed until a larger one is measured
+DEFAULT_VRAM_MIB=1024     # GPU memory in use that the default growth covers
+GROWTH_FACTOR_PCT=125     # safety factor on the growth
+EXTRA_MARGIN_MIB=512      # fixed safety margin on top
+RESERVED_MIB=1024         # /sys/power/reserved_size: RAM kept for drivers
+LIMIT_SLACK_MIB=256       # keep the image this far below half of RAM
+IMAGE_RATIO_PCT=70        # compressed image size on disk vs. in RAM (estimate)
+MAX_SECONDS=120           # time limit for pushing memory to disk
+NOTIFY=1                  # desktop notification when hibernation is cancelled
+UNLOAD_MODULES=""         # drivers unloaded while hibernating, reloaded after,
+                          # for hardware that blocks the power-off
+PROGRESS=1                # text screen with progress + blinking Caps Lock (0 = off)
+PROGRESS_VT=8             # text console used for it
+# ------------------------------------------------------------------------------
+[ -r /etc/hibernate-prepare.conf ] && . /etc/hibernate-prepare.conf
+
+STATE_DIR=/var/lib/hibernate-prepare
+HISTORY=$STATE_DIR/history          # one line per hibernation attempt
+RUN_DIR=/run/hibernate-prepare      # survives hibernation (RAM is restored)
+LOG=/var/log/hibernate-prepare.log
+
+log() {
+    echo "$*"
+    echo "$(date '+%F %T') $*" >> "$LOG" 2>/dev/null
+    say "$*"
+}
+
+# ---- progress screen (PROGRESS=1) ---------------------------------------------
+# Switches to a text console and shows what is happening, then lets the kernel
+# print its own image-writing progress there. Display problems never stop the
+# hibernation: every step here may fail silently.
+PTTY=""
+
+say() {
+    [ -n "$PTTY" ] && printf '%s\n' "$*" > "$PTTY" 2>/dev/null
+    return 0
+}
+
+# Blink the Caps Lock light in the kernel's heartbeat pattern. The kernel
+# keeps it going while the image is written with the screen off.
+leds_blink() {
+    local led trig
+    modprobe -q ledtrig_heartbeat 2>/dev/null
+    : > "$RUN_DIR/leds"
+    for led in /sys/class/leds/*::capslock; do
+        [ -w "$led/trigger" ] || continue
+        trig=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$led/trigger")
+        echo heartbeat > "$led/trigger" 2>/dev/null &&
+            echo "$led ${trig:-none}" >> "$RUN_DIR/leds"
+    done
+}
+
+leds_restore() {
+    local led trig
+    [ -r "$RUN_DIR/leds" ] || return 0
+    while read -r led trig; do
+        echo "$trig" > "$led/trigger" 2>/dev/null
+    done < "$RUN_DIR/leds"
+    rm -f "$RUN_DIR/leds"
+}
+
+progress_start() {
+    local vt
+    [ "$PROGRESS" = 1 ] || return 0
+    mkdir -p "$RUN_DIR"
+    leds_blink
+    vt=$(fgconsole 2>/dev/null) || return 0
+    [ "$vt" = "$PROGRESS_VT" ] && return 0
+    echo "$vt" > "$RUN_DIR/vt"
+    awk '{ print $1 }' /proc/sys/kernel/printk > "$RUN_DIR/printk"
+    if ! timeout 5 chvt "$PROGRESS_VT" 2>/dev/null; then
+        log "progress screen: could not switch to VT $PROGRESS_VT, continuing without it"
+        progress_end; return 0
+    fi
+    PTTY=/dev/tty$PROGRESS_VT
+    setfont -C "$PTTY" -d eurlatgr 2>/dev/null    # double size, readable on 1080p
+    printf '\033[2J\033[H' > "$PTTY" 2>/dev/null
+    log "progress screen: VT $vt -> VT $PROGRESS_VT, now on VT $(fgconsole 2>/dev/null)"
+    say "HIBERNATING - do not press the power button"
+    say "(Caps Lock blinks while it works; when the screen goes black,"
+    say " it is writing to disk and powers off by itself.)"
+    say ""
+    say "1/2  Moving memory to the swap on disk (up to ${MAX_SECONDS} s)"
+    say ""
+}
+
+# Called right before the kernel takes over
+progress_kernel() {
+    [ -n "$PTTY" ] || return 0
+    say ""
+    say "2/2  Memory ready. Next: kernel messages, then the screen goes"
+    say "     black while the image is written (Caps Lock keeps blinking,"
+    say "     fans may run), then the laptop powers off. Usually 30-90 s."
+    say ""
+    # Show the kernel's info messages ("Image saving progress: 10%" ...)
+    echo 7 > /proc/sys/kernel/printk 2>/dev/null
+}
+
+# Back to the desktop; also after waking up and after a cancel
+progress_end() {
+    leds_restore
+    if [ -r "$RUN_DIR/printk" ]; then
+        echo "$(cat "$RUN_DIR/printk")" > /proc/sys/kernel/printk 2>/dev/null
+        rm -f "$RUN_DIR/printk"
+    fi
+    if [ -r "$RUN_DIR/vt" ]; then
+        timeout 5 chvt "$(cat "$RUN_DIR/vt")" 2>/dev/null
+        log "progress screen: back to VT $(cat "$RUN_DIR/vt") (now on VT $(fgconsole 2>/dev/null))"
+        rm -f "$RUN_DIR/vt"
+    fi
+    PTTY=""
+}
+# ------------------------------------------------------------------------------
+
+die() { log "ERROR: $*"; exit 1; }
+
+meminfo_kib() { awk -v k="$1:" '$1 == k { print $2 }' /proc/meminfo; }
+used_mib() { echo $(( ($(meminfo_kib MemTotal) - $(meminfo_kib MemAvailable)) / 1024 )); }
+
+# zram devices currently used as swap
+zram_swaps() { awk '$1 ~ /^\/dev\/zram/ { print $1 }' /proc/swaps; }
+
+# Uncompressed data stored in zram swap (MiB)
+zram_data_mib() {
+    local dev total=0 bytes
+    for dev in $(zram_swaps); do
+        bytes=$(awk '{ print $1 }' "/sys/block/${dev#/dev/}/mm_stat" 2>/dev/null)
+        total=$(( total + ${bytes:-0} / 1048576 ))
+    done
+    echo $total
+}
+
+# Disk swap (everything that is not zram): "<size MiB> <used MiB>"
+disk_swap_mib() {
+    awk 'NR > 1 && $1 !~ /^\/dev\/zram/ { s += $3; u += $4 }
+         END { printf "%d %d\n", s / 1024, u / 1024 }' /proc/swaps
+}
+
+# GPU memory in use now, all GPUs (MiB)
+vram_used_mib() {
+    local total=0 f mib
+    for f in /sys/class/drm/card*/device/mem_info_vram_used; do
+        [ -r "$f" ] && total=$(( total + $(cat "$f") / 1048576 ))
+    done
+    if command -v nvidia-smi >/dev/null && [ -e /proc/driver/nvidia ]; then
+        for mib in $(timeout 10 nvidia-smi --query-gpu=memory.used \
+                     --format=csv,noheader,nounits 2>/dev/null); do
+            total=$(( total + ${mib%%.*} ))
+        done
+    fi
+    echo $total
+}
+
+# Largest measured growth and the GPU memory in use at that time: "<growth> <vram>"
+learned_growth() {
+    [ -r "$HISTORY" ] || { echo "0 0"; return; }
+    awk '$5 ~ /^[0-9]+$/ && $5 > g { g = $5; v = $6 } END { printf "%d %d\n", g, v }' "$HISTORY"
+}
+
+# Compute the plan. Sets: TOTAL LIMIT GROWTH ALLOWANCE TARGET MAX_KEEP VRAM_NOW
+#   TARGET    what we aim for: room for the growth + 25% + margin
+#   MAX_KEEP  cancel above this: room for the growth + margin, no 25%
+plan() {
+    local learned learned_vram vram_extra
+    TOTAL=$(( $(meminfo_kib MemTotal) / 1024 ))
+    LIMIT=$(( TOTAL / 2 - LIMIT_SLACK_MIB ))
+    read -r learned learned_vram < <(learned_growth)
+    GROWTH=$DEFAULT_GROWTH_MIB
+    if [ "$learned" -gt "$GROWTH" ]; then
+        GROWTH=$learned
+    else
+        learned_vram=$DEFAULT_VRAM_MIB
+    fi
+    VRAM_NOW=$(vram_used_mib)
+    # GPU memory in use beyond what was in use when the growth was measured
+    vram_extra=$(( VRAM_NOW - learned_vram ))
+    [ $vram_extra -lt 0 ] && vram_extra=0
+    ALLOWANCE=$(( GROWTH * GROWTH_FACTOR_PCT / 100 + EXTRA_MARGIN_MIB + vram_extra ))
+    TARGET=$(( LIMIT - ALLOWANCE ))
+    MAX_KEEP=$(( LIMIT - GROWTH - EXTRA_MARGIN_MIB - vram_extra ))
+}
+
+# Tell everyone logged in graphically (we run as root, outside the session)
+notify_users() {
+    [ "$NOTIFY" = 1 ] || return 0
+    command -v notify-send >/dev/null || return 0
+    local sid user uid
+    for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+        [ "$(loginctl show-session "$sid" -p Type --value)" = wayland ] ||
+            [ "$(loginctl show-session "$sid" -p Type --value)" = x11 ] || continue
+        user=$(loginctl show-session "$sid" -p Name --value)
+        uid=$(id -u "$user" 2>/dev/null) || continue
+        runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            notify-send -u critical -a Hibernation -i system-suspend-hibernate \
+            "$1" "$2" 2>/dev/null &
+    done
+    wait
+}
+
+zram_off() {
+    local dev
+    mkdir -p "$RUN_DIR"
+    : > "$RUN_DIR/zram-disabled"
+    for dev in $(zram_swaps); do
+        if swapoff "$dev"; then
+            echo "$dev" >> "$RUN_DIR/zram-disabled"
+            log "zram swap $dev disabled"
+        else
+            log "could not disable zram swap $dev"
+            return 1
+        fi
+    done
+}
+
+zram_on() {
+    local dev unit
+    [ -r "$RUN_DIR/zram-disabled" ] || return 0
+    while read -r dev; do
+        [ -n "$dev" ] || continue
+        grep -q "^$dev " /proc/swaps && continue
+        # systemd (zram-generator) recreates the device itself; we only make
+        # sure it is started. --no-block: we may run inside a systemd sleep job.
+        unit=$(systemd-escape -p --suffix=swap "$dev")
+        if systemctl --no-block start "$unit" 2>/dev/null; then
+            log "zram swap $dev re-enable requested"
+        else
+            swapon -p 100 "$dev" && log "zram swap $dev re-enabled"
+        fi
+    done < "$RUN_DIR/zram-disabled"
+    rm -f "$RUN_DIR/zram-disabled"
+}
+
+# Unload drivers that block the power-off (only those loaded); the list is
+# kept in RUN_DIR so "post" reloads them, also after a failed attempt.
+modules_unload() {
+    local m
+    mkdir -p "$RUN_DIR"
+    for m in $UNLOAD_MODULES; do
+        lsmod | grep -q "^${m//-/_} " || continue
+        if modprobe -r "$m"; then
+            echo "$m" >> "$RUN_DIR/modules-unloaded"
+            log "driver $m unloaded"
+        else
+            log "could not unload driver $m (continuing)"
+        fi
+    done
+}
+
+modules_reload() {
+    local m
+    [ -r "$RUN_DIR/modules-unloaded" ] || return 0
+    while read -r m; do
+        [ -n "$m" ] || continue
+        modprobe "$m" && log "driver $m reloaded"
+    done < "$RUN_DIR/modules-unloaded"
+    rm -f "$RUN_DIR/modules-unloaded"
+}
+
+cancel() {
+    log "CANCELLED: $1 - $2"
+    [ -n "$PTTY" ] && sleep 5      # let the reason be read on the progress screen
+    progress_end
+    zram_on
+    notify_users "Hibernation cancelled" "$1
+$2"
+    exit 1
+}
+
+do_pre() {
+    local used zram swap_size swap_used swap_free push image_disk need suggest
+    local end last stalls step
+    progress_start
+    plan
+    used=$(used_mib)
+    zram=$(zram_data_mib)
+    read -r swap_size swap_used < <(disk_swap_mib)
+    swap_free=$(( swap_size - swap_used ))
+    log "plan: RAM ${TOTAL} MiB, image limit ${LIMIT} MiB, GPU allowance ${ALLOWANCE} MiB" \
+        "(growth ${GROWTH}, GPU memory in use ${VRAM_NOW}), keep in RAM ${TARGET} MiB (cancel above ${MAX_KEEP});" \
+        "in use ${used} MiB + zram ${zram} MiB, disk swap free ${swap_free} of ${swap_size} MiB"
+
+    [ "$swap_size" -gt 0 ] || cancel "No disk swap." \
+        "Hibernation needs a swap partition or swap file on disk (zram does not count)."
+
+    [ $TARGET -ge 1024 ] || cancel "Too much GPU memory in use (${VRAM_NOW} MiB)." \
+        "The image would not fit in RAM. Close graphics-heavy apps (video editors, games, 3D) and try again."
+
+    # Room on disk swap: memory pushed out + the image itself
+    push=$(( used + zram - TARGET )); [ $push -lt 0 ] && push=0
+    image_disk=$(( (TARGET + ALLOWANCE) * IMAGE_RATIO_PCT / 100 ))
+    need=$(( push + image_disk + 512 ))
+    if [ $need -gt $swap_free ]; then
+        suggest=$(( (swap_used + need + 2048 + 1023) / 1024 ))
+        cancel "Not enough swap space: needs about $(( need / 1024 + 1 )) GB free, has $(( swap_free / 1024 )) GB." \
+            "Close some apps and try again. If this happens often, make the swap partition at least ${suggest} GB."
+    fi
+
+    echo $(( RESERVED_MIB * 1048576 )) > /sys/power/reserved_size
+    echo $(( TARGET * 1048576 )) > /sys/power/image_size
+
+    zram_off || cancel "Could not turn off zram swap." "See $LOG."
+    sync
+    echo 1 > /proc/sys/vm/drop_caches
+
+    # Push memory out to disk swap until "in use" is at or below the target.
+    end=$(( SECONDS + MAX_SECONDS )); last=$(used_mib); stalls=0
+    while [ $SECONDS -lt $end ]; do
+        used=$(used_mib)
+        [ $used -le $TARGET ] && break
+        step=$(( used - TARGET )); [ $step -gt 1024 ] && step=1024
+        # Fails with EAGAIN when it frees less than asked; the loop retries.
+        echo "${step}M" > /sys/fs/cgroup/memory.reclaim 2>/dev/null
+        if [ $(( last - $(used_mib) )) -lt 32 ]; then
+            stalls=$(( stalls + 1 )); [ $stalls -ge 5 ] && break
+        else
+            stalls=0
+        fi
+        last=$(used_mib)
+        [ -n "$PTTY" ] && printf '\r     in RAM: %6d MiB   goal: %d MiB   ' "$last" "$TARGET" > "$PTTY" 2>/dev/null
+    done
+    say ""
+    used=$(used_mib)
+    log "in use after pushing to disk: ${used} MiB (target ${TARGET} MiB)"
+
+    # Not reaching TARGET is normal: kernel, driver and desktop memory cannot
+    # be swapped out and varies a few hundred MiB between attempts.
+    [ $used -le $MAX_KEEP ] || cancel \
+        "Not enough memory could be moved to disk (${used} MiB left in RAM, at most ${MAX_KEEP} MiB fits)." \
+        "What is left cannot be swapped out (kernel, GPU drivers, desktop). Close graphics-heavy apps and try again."
+
+    mkdir -p "$RUN_DIR"
+    echo "$VRAM_NOW" > "$RUN_DIR/vram"
+    modules_unload
+    progress_kernel
+}
+
+# Read the last hibernation attempt from the kernel log and record it.
+learn() {
+    local entry alloc needed result vram growth
+    entry=$(dmesg | grep 'PM: hibernation: hibernation entry' | tail -1 | sed 's/^\[ *\([0-9.]*\)\].*/\1/')
+    [ -n "$entry" ] || return 0
+    [ "$entry" = "$(cat "$RUN_DIR/learned-entry" 2>/dev/null)" ] && return 0
+    mkdir -p "$RUN_DIR" "$STATE_DIR"
+    echo "$entry" > "$RUN_DIR/learned-entry"
+
+    # Kernel log lines after the last "hibernation entry"
+    dmesg | awk -v e="$entry" '
+        /PM: hibernation: hibernation entry/ { s = index($0, e) > 0 }
+        s' > "$RUN_DIR/last-attempt"
+    alloc=$(grep -o 'Allocated [0-9]* pages for snapshot' "$RUN_DIR/last-attempt" | tail -1 | awk '{ print $2 }')
+    needed=$(grep -o 'Normal pages needed: [0-9]*' "$RUN_DIR/last-attempt" | tail -1 | awk '{ print $4 }')
+    if grep -q 'Error -12 creating image\|Not enough free memory' "$RUN_DIR/last-attempt"; then
+        result=failed
+    else
+        result=ok
+    fi
+    vram=$(cat "$RUN_DIR/vram" 2>/dev/null || echo 0)
+    if [ -n "$alloc" ] && [ -n "$needed" ]; then
+        growth=$(( (needed - alloc) * 4 / 1024 )); [ $growth -lt 0 ] && growth=0
+        # date  alloc_MiB  needed_MiB  result  growth_MiB  gpu_mem_MiB
+        echo "$(date '+%F_%T') $(( alloc * 4 / 1024 )) $(( needed * 4 / 1024 )) $result $growth $vram" >> "$HISTORY"
+        log "learned: image ${result}, sized $(( alloc * 4 / 1024 )) MiB, needed $(( needed * 4 / 1024 )) MiB," \
+            "GPU growth ${growth} MiB (GPU memory in use ${vram} MiB)"
+    fi
+}
+
+do_post() {
+    progress_end
+    modules_reload
+    zram_on
+    learn
+}
+
+do_calibrate() {
+    local old_mode rc
+    [ -t 0 ] || die "calibrate must be run from a terminal"
+    cat <<EOF
+Calibration runs a complete hibernation, but restores at once instead of
+powering off. The screens go black for about a minute, then everything comes
+back. Save your work first.
+
+EOF
+    read -r -p "Start calibration? [y/N] " answer
+    [ "$answer" = y ] || [ "$answer" = Y ] || exit 0
+
+    do_pre
+    old_mode=$(sed 's/.*\[\(.*\)\].*/\1/' /sys/power/disk)
+    echo test_resume > /sys/power/disk
+    log "calibration: test hibernation starting"
+    echo disk > /sys/power/state; rc=$?
+    echo "$old_mode" > /sys/power/disk
+    do_post
+    if [ $rc -eq 0 ]; then
+        log "calibration: test hibernation passed"
+    else
+        log "calibration: test hibernation FAILED (see 'hibernate-prepare status' and $LOG)"
+    fi
+    echo
+    do_status
+    return $rc
+}
+
+do_status() {
+    local used zram swap_size swap_used
+    plan
+    used=$(used_mib); zram=$(zram_data_mib)
+    read -r swap_size swap_used < <(disk_swap_mib)
+    cat <<EOF
+RAM                      ${TOTAL} MiB
+Image limit (RAM/2)      ${LIMIT} MiB
+GPU growth used          ${GROWTH} MiB  (default ${DEFAULT_GROWTH_MIB}, largest measured $(learned_growth | cut -d' ' -f1))
+GPU memory in use now    ${VRAM_NOW} MiB
+GPU allowance            ${ALLOWANCE} MiB
+Keep in RAM (aim)        ${TARGET} MiB
+Cancel above             ${MAX_KEEP} MiB
+In use now               ${used} MiB RAM + ${zram} MiB in zram
+Disk swap                ${swap_used} of ${swap_size} MiB used
+EOF
+    if [ -r "$HISTORY" ]; then
+        echo
+        echo "Last attempts (date, image MiB, needed MiB, result, GPU growth MiB, GPU memory MiB):"
+        tail -5 "$HISTORY"
+    fi
+}
+
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+case "${1:-}" in
+    pre)       do_pre ;;
+    post)      do_post ;;
+    calibrate) do_calibrate ;;
+    status)    do_status ;;
+    *) echo "usage: $0 pre|post|calibrate|status" >&2; exit 2 ;;
+esac

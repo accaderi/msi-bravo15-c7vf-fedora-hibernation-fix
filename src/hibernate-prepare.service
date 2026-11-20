@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare RAM for hibernation (zram off, push memory to disk swap)
+Documentation=file:/usr/local/sbin/hibernate-prepare
+Before=systemd-hibernate.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hibernate-prepare pre
+TimeoutStartSec=300
+
+[Install]
+# Required (not just wanted): if preparing fails, hibernation is cancelled
+# instead of running into an abort that can crash the NVIDIA driver.
+RequiredBy=systemd-hibernate.service
