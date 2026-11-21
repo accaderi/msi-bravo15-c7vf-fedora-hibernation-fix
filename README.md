@@ -479,6 +479,8 @@ script ignores it and continues. To turn it off: `PROGRESS=0` in
 | Black screen, orange LED, stays like that; after a long-press it boots fresh | image did not fit and the NVIDIA driver crashed (driver bug after an aborted hibernation) | same; after the reboot: `journalctl -b -1 -k \| grep -E 'PM:\|NVRM\|BUG'` |
 | Orange LED, silent, never powers off; after a long-press it **does** resume your session | power-off mode is not `platform` | `systemd-analyze cat-config systemd/sleep.conf \| grep HibernateMode`; the last one listed must be `platform` |
 | Powers off, but boots a fresh session | resume not found | Prerequisites 3; `cat /proc/cmdline` must show `resume=` |
+| Power button set to Hibernate does nothing | KDE's power management (PowerDevil) gets the key but ignores it; seen after a log-out screen had been left open in the background (`plasma-shutdown` and `ksmserver-logout-greeter` still running) | `systemctl --user restart plasma-powerdevil.service`, or log out and back in |
+| Power button light orange instead of white | not a fault: on MSI laptops the light is white when only the built-in AMD graphics run and orange when the NVIDIA card is on. The HDMI and USB-C display outputs are wired to the NVIDIA card, so with an external monitor plugged in it is always orange (already from the end of the MSI logo) | nothing to do; unplug the external monitors and it turns white |
 | Wi-Fi missing after waking | driver did not reinitialize | `sudo modprobe -r mt7921e && sudo modprobe mt7921e`; if it happens often, set `UNLOAD_MODULES="mt7921e"` |
 
 Tests that find which stage fails:
