@@ -9,7 +9,28 @@ install -D -m 755 src/hibernate-prepare        /usr/local/sbin/hibernate-prepare
 install -D -m 755 src/hibernate-prepare.sleep  /usr/lib/systemd/system-sleep/hibernate-prepare
 install -D -m 644 src/hibernate-prepare.service /etc/systemd/system/hibernate-prepare.service
 install -D -m 644 src/hibernate-mode.conf      /etc/systemd/sleep.conf.d/hibernate-prepare.conf
-[ -e /etc/hibernate-prepare.conf ] || install -m 644 src/hibernate-prepare.conf /etc/hibernate-prepare.conf
+# Settings file: the current version, with the values you set in yours kept
+conf=/etc/hibernate-prepare.conf
+if [ -e "$conf" ]; then
+    new=$(mktemp)
+    cp src/hibernate-prepare.conf "$new"
+    grep -E '^[A-Z_]+=' "$conf" | while IFS= read -r line; do
+        key=${line%%=*}
+        # replace the commented default of that setting, or append it
+        LINE=$line awk -v key="$key" '
+            !done && $0 ~ "^#?" key "=" { print ENVIRON["LINE"]; done = 1; next }
+            { print }
+            END { if (!done) print ENVIRON["LINE"] }' "$new" > "$new.2" && mv "$new.2" "$new"
+    done
+    if ! cmp -s "$new" "$conf"; then
+        cp "$conf" "$conf.old"
+        install -m 644 "$new" "$conf"
+        echo "   updated $conf (your settings kept; previous file: $conf.old)"
+    fi
+    rm -f "$new"
+else
+    install -m 644 src/hibernate-prepare.conf "$conf"
+fi
 mkdir -p /var/lib/hibernate-prepare
 
 if [ "$(getenforce 2>/dev/null)" != Disabled ] && command -v getenforce >/dev/null; then

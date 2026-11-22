@@ -64,11 +64,12 @@ working, self-adjusting hibernation.
 | NVIDIA driver | 615.71.09 *open* kernel modules (RPM Fusion `akmod-nvidia`) |
 | Secure Boot | off |
 
-Tested 2026-11-20 to 2026-11-22 with the final setup: 3 test hibernations
-(`calibrate`) and 8 real hibernations started from the start menu, all powered
-off by themselves and resumed. The largest had about 12 GB of RAM in use, and
-one was resumed after almost a day powered off. Hibernations started with the
-power button failed; see [Power button and lid](#power-button-and-lid). Measurements are in
+Tested 2026-11-20 to 2026-11-22 with the final setup: 4 test hibernations
+(`calibrate`), 9 real hibernations started from the start menu and 3 started
+with the power button, all powered off by themselves and resumed. The largest
+had about 12 GB of RAM in use, and one was resumed after almost a day powered
+off. Before the power-button fix, 5 of 5 power-button hibernations failed; see
+[Power button and lid](#power-button-and-lid). Measurements are in
 [INVESTIGATION.md](INVESTIGATION.md#measurements).
 
 **Not tested:** other RAM sizes, swap files (only a swap partition), btrfs,
@@ -292,7 +293,9 @@ The installer:
      hibernation, *required* by it, so a cancel stops the hibernation;
    - `/usr/lib/systemd/system-sleep/hibernate-prepare`: runs it after waking;
    - `/etc/systemd/sleep.conf.d/hibernate-prepare.conf`: `HibernateMode=platform`;
-   - `/etc/hibernate-prepare.conf`: settings, all commented out.
+   - `/etc/hibernate-prepare.conf`: settings, all commented out. Running the
+     installer again updates it to the current list and keeps the values you
+     set (the previous file is kept as `.old`).
 2. Builds and installs the SELinux module `nvidia_hibernate_local`, which lets
    the NVIDIA driver write to `/var/tmp` while hibernating. It installs the
    `checkpolicy` package if missing.
@@ -314,24 +317,23 @@ heaviest GPU app open, for example a video editor with a project loaded.
 ## Check that it works
 
 1. Save your work, then click **Hibernate** in the KDE menu.
-2. Wait. The screen switches to a text screen, and the **Caps Lock light
-   blinks** while it works:
+2. Wait, hands off (see [Power button and lid](#power-button-and-lid)). The
+   screen switches to a text screen:
 
    | Phase | Screen | Caps Lock light | Time (16 GB, tested) |
    |---|---|---|---|
    | Memory pushed to disk | "HIBERNATING", memory counting down | blinks | 10–30 s |
-   | Kernel freezes everything, prepares the image | kernel messages, then black; fans may run | blinks faster (CPU busy) | a few s |
-   | Copy of memory made | black | **steady** (keyboard asleep too) | 10–20 s |
-   | Image written to disk | black | blinks | a few s |
+   | Kernel freezes everything, makes the copy, writes it | kernel messages, then black; fans may run | stops (built-in keyboard disconnected) | 30–90 s |
    | Power-off | off | off | |
 
-   **Blinking** means it is working. **Steady** is normal for up to about
-   20 s. Steady, or nothing changing at all, for more than **3 minutes**
-   means it is stuck; see [Troubleshooting](#troubleshooting).
+   Nothing changing for more than **3 minutes** means it is stuck; see
+   [Troubleshooting](#troubleshooting).
 
    The screen stays black while the image is written, because the AMD driver
-   does not wake the screen just before a power-off. Nothing can be shown
-   there, so the light is the only sign.
+   does not wake the screen just before a power-off. With `DETACH_KEYBOARD=0`
+   the light keeps blinking through the black phase (steady for 10–20 s while
+   the copy is made), but then the power button and keyboard can roll the
+   hibernation back.
 3. Power on. After GRUB, the screen goes back from the text screen to the lock
    screen; sign in and everything is as you left it. Plasma locks the screen before every sleep. You can turn
    that off in System Settings → Screen Locking.
@@ -379,29 +381,47 @@ heaviest GPU app open, for example a video editor with a project loaded.
 
 ### Power button and lid
 
-**Do not start hibernation with the power button on the C7VF.** It can be set
-(System Settings → Power Management → "When power button pressed" →
-Hibernate), but on this laptop every hibernation started that way failed
-(5 of 5). The image is written, then the laptop's controller sends stray
-keyboard bytes and button events, the kernel takes them as user activity and
-rolls the hibernation back, and the NVIDIA driver crashes on that path:
-black screen, orange LED, long-press, and the session is lost.
-Hibernation from the **start menu** worked every time (31 of 31). Details in
-[INVESTIGATION.md](INVESTIGATION.md#step-11-the-power-button-rolls-hibernation-back).
+**Power button → Hibernate works** with two settings that are on by default:
 
-- Keep the power button on *Shut Down* or *Show logout screen* and hibernate
-  from the start menu (or the logout screen).
-- **Closing the lid** goes through the same controller and has not been tested
-  with hibernation; treat it like the power button.
-- A keyboard shortcut for hibernation (System Settings → Keyboard →
-  Shortcuts → Power Management → Hibernate) has not been tested either.
-- Always choose plain **Hibernate**, not *Hybrid sleep* or *Sleep, then hibernate*.
-  Those take a different path in systemd that `hibernate-prepare` does not
-  handle yet, so they would run into the original problems (image does not
-  fit, NVIDIA crash).
-- Lid with external monitors: if "Even when an external monitor is connected"
-  is on, closing the lid hibernates also while you work on external screens.
-  Turn it off if you use the laptop closed.
+- On this laptop, a power-button press leaves the laptop's controller (which
+  also runs the built-in keyboard) sending stray keyboard bytes and button
+  events later. They arrived while the image was being written, the kernel
+  took them as user activity and rolled the hibernation back, and the NVIDIA
+  driver crashed on the way back: black screen, orange LED, long-press,
+  session lost (5 of 5 times). Details in
+  [INVESTIGATION.md](INVESTIGATION.md#step-11-the-power-button-rolls-hibernation-back).
+- `DETACH_POWER_BUTTON=1` and `DETACH_KEYBOARD=1` disconnect the power-button
+  driver and the built-in keyboard controller just before the kernel takes
+  over, and reconnect them after waking. Since then: 3 of 3 power-button
+  hibernations fine. The firmware still powers the laptop on with the button.
+- If you set them to `0` (for example because the keyboard or power button
+  ever stays dead after waking; a restart fixes that), hibernate from the
+  start menu instead: that works without them.
+
+To use it: System Settings → **Power Management** → "When power button
+pressed" → **Hibernate**, in each profile you use (On AC Power, On Battery,
+On Low Battery).
+
+**Keyboard shortcut:** System Settings → Keyboard → Shortcuts → Power
+Management → **Hibernate**. Works from any keyboard (built-in, USB,
+Bluetooth); KDE warns if the keys are already taken. The keyboard is only
+disconnected later, so the shortcut is not affected. Not tested yet.
+
+**Lid:** closing the lid → Hibernate is possible but **not tested**. The lid
+also goes through the controller but is not disconnected, because
+reconnecting it could report "lid closed" and set off the lid action again.
+Keep the lid on *Shut Down* or *Do nothing* unless you test it.
+
+**Touching things while it hibernates:** with the defaults, the built-in
+keyboard and power button are disconnected, and USB devices (mice,
+keyboards, receivers, the Bluetooth adapter) and the touchpad cannot wake it
+(`NO_INPUT_WAKEUP=1`). Touching them should not cancel the hibernation, but
+that has not been tested on purpose: to be safe, hands off until it is off.
+
+- Always choose plain **Hibernate**, not *Hybrid sleep* or *Sleep, then
+  hibernate*. Those take a different path in systemd that `hibernate-prepare`
+  does not handle yet, so they would run into the original problems (image
+  does not fit, NVIDIA crash).
 - **Sleep (suspend) is not tested** with this fix. The C7VF only offers
   `s2idle` (`cat /sys/power/mem_sleep`). The screens switching off after a few
   idle minutes is not sleep; real sleep shows up in
@@ -431,6 +451,9 @@ cat /var/lib/hibernate-prepare/history   # date, image MiB, needed MiB, ok/faile
 | `MAX_SECONDS` | 120 | time limit for pushing memory to disk |
 | `NOTIFY` | 1 | desktop notification when cancelled (0 = off) |
 | `PROGRESS` | 1 | text screen with progress and blinking Caps Lock while hibernating (0 = off; see below) |
+| `DETACH_POWER_BUTTON` | 1 | disconnect the power-button driver while hibernating (see [Power button and lid](#power-button-and-lid)) |
+| `DETACH_KEYBOARD` | 1 | disconnect the built-in keyboard controller while hibernating; the Caps Lock light stops once the kernel takes over |
+| `NO_INPUT_WAKEUP` | 1 | USB devices (mice, keyboards, receivers, Bluetooth adapter) and the touchpad cannot cancel the hibernation |
 | `PROGRESS_VT` | 8 | text console used for the progress screen |
 | `UNLOAD_MODULES` | empty | drivers unloaded while hibernating and reloaded after, for hardware that blocks the power-off; not needed on the C7VF |
 
@@ -460,10 +483,10 @@ On by default (`PROGRESS=1`):
   full-screen text console (VT 8). It shows how much memory is still in RAM
   while it is pushed to disk, then the kernel's own messages.
 - The Caps Lock light gets the kernel's *heartbeat* pattern (blink-blink,
-  pause). The kernel keeps it going after all programs are frozen, so it also
-  shows activity while the screen is black. It blinks faster when the CPU is
-  busy. It is steady while the keyboard itself is asleep, during the memory
-  copy, about 10–20 s.
+  pause) while memory is pushed to disk. With `DETACH_KEYBOARD=1` (default)
+  it stops when the kernel takes over, because the built-in keyboard is then
+  disconnected; with `DETACH_KEYBOARD=0` it keeps blinking through the black
+  phase.
 - After waking up, or after a cancel, it switches back to the desktop and the
   light returns to normal Caps Lock behaviour.
 - During `calibrate`, the screen also wakes up while the image is written and
@@ -487,7 +510,8 @@ script ignores it and continues. To turn it off: `PROGRESS=0` in
 | Black screen, orange LED, stays like that; after a long-press it boots fresh | image did not fit and the NVIDIA driver crashed (driver bug after an aborted hibernation) | same; after the reboot: `journalctl -b -1 -k \| grep -E 'PM:\|NVRM\|BUG'` |
 | Orange LED, silent, never powers off; after a long-press it **does** resume your session | power-off mode is not `platform` | `systemd-analyze cat-config systemd/sleep.conf \| grep HibernateMode`; the last one listed must be `platform` |
 | Powers off, but boots a fresh session | resume not found | Prerequisites 3; `cat /proc/cmdline` must show `resume=` |
-| Hibernation started with the **power button**: black screen, orange LED, long-press needed, then a fresh boot | the controller's stray keyboard bytes after the press make the kernel roll the hibernation back (log: `Spurious ACK on isa0060/serio0`, `Wakeup pending, aborting suspend`), and the NVIDIA driver crashes on that path | hibernate from the start menu; see [Power button and lid](#power-button-and-lid) |
+| Hibernation started with the **power button**: black screen, orange LED, long-press needed, then a fresh boot | `DETACH_POWER_BUTTON` / `DETACH_KEYBOARD` are off: the controller's stray keyboard bytes after the press make the kernel roll the hibernation back (log: `Spurious ACK on isa0060/serio0`, `Wakeup pending, aborting suspend`), and the NVIDIA driver crashes on that path | set both to 1, or hibernate from the start menu; see [Power button and lid](#power-button-and-lid) |
+| Built-in keyboard or power button dead after waking | reconnecting it failed (log: `could not reconnect`) | restart, or `echo i8042 \| sudo tee /sys/bus/platform/drivers/i8042/bind` (keyboard), `echo PNP0C0C:00 \| sudo tee /sys/bus/platform/drivers/acpi-button/bind` (power button); if it happens again, set `DETACH_KEYBOARD=0` / `DETACH_POWER_BUTTON=0` and hibernate from the start menu |
 | Power button set to Hibernate does nothing | KDE's power management (PowerDevil) gets the key but ignores it; seen after a log-out screen had been left open in the background (`plasma-shutdown` and `ksmserver-logout-greeter` still running) | `systemctl --user restart plasma-powerdevil.service`, or log out and back in |
 | Power button light orange instead of white | not a fault: on MSI laptops the light is white when only the built-in AMD graphics run and orange when the NVIDIA card is on. The HDMI and USB-C display outputs are wired to the NVIDIA card, so with an external monitor plugged in it is always orange (already from the end of the MSI logo) | nothing to do; unplug the external monitors and it turns white |
 | Wi-Fi missing after waking | driver did not reinitialize | `sudo modprobe -r mt7921e && sudo modprobe mt7921e`; if it happens often, set `UNLOAD_MODULES="mt7921e"` |

@@ -247,6 +247,8 @@ What could and could not be shown:
   with the text screen → faster blinking with the screen off (CPU busy) →
   **steady for about 15 s** (memory copy, keyboard asleep too) → about 3 s of
   blinking (image written) → power-off.
+  Since step 11 the built-in keyboard is disconnected while the kernel works,
+  so the light now only blinks while memory is pushed out.
 - A first test showed a blank screen with the text console active. The next
   runs, with each switch written to the log, worked; the first time was most
   likely a matter of watching at the wrong moment, as the memory phase lasted
@@ -295,8 +297,26 @@ Wrong turns, for the record:
 - One power-button attempt seemed to work, but its log shows the same
   rollback; the desktop just happened to survive the NVIDIA warnings.
 
-**Fix:** do not hibernate with the power button (README, *Power button and
-lid*). `hibernate-prepare` turns on the kernel's debug messages
+**Fix:** disconnect the drivers instead of only their wakeup permission. Just
+before the kernel takes over, `hibernate-prepare` unbinds the power-button
+driver (`acpi-button`, `PNP0C0C:00`) and the built-in keyboard controller
+(`i8042`), and binds them again first thing after waking:
+
+```
+echo PNP0C0C:00 > /sys/bus/platform/drivers/acpi-button/unbind     # ... /bind after waking
+echo i8042      > /sys/bus/platform/drivers/i8042/unbind           # ... /bind after waking
+```
+
+With no driver listening, the controller's stray bytes go nowhere. Result: a
+test hibernation (both reconnected, keyboard and touchpad working), a
+start-menu hibernation, and 3 of 3 power-button hibernations fine.
+The lid is not disconnected: rebinding it could report "lid closed" and set
+off the lid action. As an extra, `NO_INPUT_WAKEUP=1` switches off wakeup for
+USB devices (Logitech receiver, Bluetooth adapter) and the I2C touchpad while
+hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
+`NO_INPUT_WAKEUP` (README, *Settings*).
+
+`hibernate-prepare` also turns on the kernel's debug messages
 (`/sys/power/pm_debug_messages`) while hibernating and records a rollback as
 `rolled-back` in its history, so another cause would show up in the log.
 
@@ -324,6 +344,10 @@ the device freeze; the GPU growth is the difference.
 | real, progress screen + Caps Lock | 3815 | 6334 | ok | 2519 |
 | real, start menu, ~12 GB in use before | 3898 | 6572 | ok | 2673 |
 | real, power button (rolled back after writing) | 3804 | 6411 | rolled-back | 2607 |
+| real, start menu, drivers disconnected | 3301 | 5322 | ok | 2021 |
+| real, power button, drivers disconnected | 3433 | 5659 | ok | 2225 |
+| real, power button, drivers disconnected | 3514 | 5809 | ok | 2294 |
+| real, power button, drivers disconnected + no USB/touchpad wakeup | 3797 | 6272 | ok | 2475 |
 
 The limit on this laptop is about 7330 MiB (half of RAM minus 256 MiB). Every
 attempt that needed more failed; every attempt below it worked. The growth
