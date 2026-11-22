@@ -52,6 +52,10 @@ DETACH_KEYBOARD=1         # built-in keyboard controller (i8042); the Caps Lock
                           # light stops blinking once the kernel takes over
 NO_INPUT_WAKEUP=1         # USB devices (mice, keyboards, receivers, Bluetooth
                           # adapter) and the touchpad cannot cancel it either
+SCREEN_ON_AFTER_LID=1     # hibernated with the lid closed and woken with it
+                          # open: switch the built-in screen back on (the
+                          # desktop turns it off on closing and may not
+                          # turn it on again)
 # ------------------------------------------------------------------------------
 [ -r /etc/hibernate-prepare.conf ] && . /etc/hibernate-prepare.conf
 
@@ -258,6 +262,45 @@ notify_users() {
     wait
 }
 
+# Run a command in each graphical session, as its user
+in_sessions() {
+    local sid user uid
+    for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+        case $(loginctl show-session "$sid" -p Type --value) in wayland|x11) ;; *) continue ;; esac
+        user=$(loginctl show-session "$sid" -p Name --value)
+        uid=$(id -u "$user" 2>/dev/null) || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
+    done
+}
+
+lid_closed() { grep -qs closed /proc/acpi/button/lid/*/state; }
+
+# Before: remember a closed lid. After: lid open again but the built-in
+# screen (eDP/LVDS/DSI) still off -> switch it on, as opening the lid would.
+lid_note() {
+    rm -f "$RUN_DIR/lid-closed"
+    [ "$SCREEN_ON_AFTER_LID" = 1 ] && lid_closed && { mkdir -p "$RUN_DIR"; touch "$RUN_DIR/lid-closed"; }
+    return 0
+}
+
+screen_on_after_lid() {
+    local i out
+    [ -e "$RUN_DIR/lid-closed" ] || return 0
+    rm -f "$RUN_DIR/lid-closed"
+    command -v kscreen-doctor >/dev/null || return 0
+    for i in 1 2 3 4 5 6 7 8 9 10; do          # the desktop needs a moment after waking
+        sleep 1
+        lid_closed && return 0
+        out=$(in_sessions kscreen-doctor -o 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' |
+              awk '/^Output:/ { name = $3 } /^\tdisabled/ && name ~ /^(eDP|LVDS|DSI)/ { print name; exit }')
+        [ -n "$out" ] || continue
+        in_sessions kscreen-doctor "output.$out.enable" >/dev/null 2>&1 &&
+            log "built-in screen $out switched back on (lid was closed when hibernating)"
+        return 0
+    done
+}
+
 zram_off() {
     local dev
     mkdir -p "$RUN_DIR"
@@ -408,6 +451,7 @@ do_pre() {
     local used zram swap_size swap_used swap_free push image_disk need suggest
     local end last stalls step
     progress_start
+    lid_note
     plan
     used=$(used_mib)
     zram=$(zram_data_mib)
@@ -521,6 +565,7 @@ do_post() {
     modules_reload
     zram_on
     learn
+    screen_on_after_lid
 }
 
 do_calibrate() {
