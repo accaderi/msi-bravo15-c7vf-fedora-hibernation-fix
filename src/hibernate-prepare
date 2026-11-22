@@ -42,6 +42,16 @@ UNLOAD_MODULES=""         # drivers unloaded while hibernating, reloaded after,
                           # for hardware that blocks the power-off
 PROGRESS=1                # text screen with progress + blinking Caps Lock (0 = off)
 PROGRESS_VT=8             # text console used for it
+# Experimental. On the MSI Bravo 15 C7VF, hibernation started with the power
+# button was always rolled back right after the image was written: the laptop's
+# controller sent stray keyboard bytes and button events, the kernel took them
+# as user activity, and the NVIDIA driver crashed on the way back. These
+# disconnect the drivers while hibernating; "post" reconnects them.
+DETACH_POWER_BUTTON=1     # power button driver (the firmware still powers on)
+DETACH_KEYBOARD=1         # built-in keyboard controller (i8042); the Caps Lock
+                          # light stops blinking once the kernel takes over
+NO_INPUT_WAKEUP=1         # USB devices (mice, keyboards, receivers, Bluetooth
+                          # adapter) and the touchpad cannot cancel it either
 # ------------------------------------------------------------------------------
 [ -r /etc/hibernate-prepare.conf ] && . /etc/hibernate-prepare.conf
 
@@ -124,8 +134,9 @@ progress_start() {
     setfont -C "$PTTY" -d eurlatgr 2>/dev/null    # double size, readable on 1080p
     printf '\033[2J\033[H' > "$PTTY" 2>/dev/null
     log "progress screen: VT $vt -> VT $PROGRESS_VT, now on VT $(fgconsole 2>/dev/null)"
-    say "HIBERNATING - do not press the power button"
-    say "(Caps Lock blinks while it works; when the screen goes black,"
+    say "HIBERNATING - do not touch the keyboard, touchpad, mouse or"
+    say "power button until the laptop is off."
+    say "(Caps Lock blinks while memory is moved; when the screen goes black,"
     say " it is writing to disk and powers off by itself.)"
     say ""
     say "1/2  Moving memory to the swap on disk (up to ${MAX_SECONDS} s)"
@@ -137,8 +148,8 @@ progress_kernel() {
     [ -n "$PTTY" ] || return 0
     say ""
     say "2/2  Memory ready. Next: kernel messages, then the screen goes"
-    say "     black while the image is written (Caps Lock keeps blinking,"
-    say "     fans may run), then the laptop powers off. Usually 30-90 s."
+    say "     black while the image is written (fans may run), then the"
+    say "     laptop powers off. Usually 30-90 s."
     say ""
     # Show the kernel's info messages ("Image saving progress: 10%" ...)
     echo 7 > /proc/sys/kernel/printk 2>/dev/null
@@ -306,6 +317,69 @@ modules_reload() {
     rm -f "$RUN_DIR/modules-unloaded"
 }
 
+# Disconnect the power button and/or built-in keyboard drivers (see
+# DETACH_POWER_BUTTON / DETACH_KEYBOARD); the list is kept for "post".
+inputs_detach() {
+    local d
+    mkdir -p "$RUN_DIR"
+    : > "$RUN_DIR/detached"
+    if [ "$DETACH_POWER_BUTTON" = 1 ]; then
+        for d in /sys/bus/platform/drivers/acpi-button/PNP0C0C:*; do
+            [ -e "$d" ] || continue
+            d=$(basename "$d")
+            echo "$d" > /sys/bus/platform/drivers/acpi-button/unbind 2>/dev/null &&
+                echo "acpi-button $d" >> "$RUN_DIR/detached"
+        done
+    fi
+    if [ "$DETACH_KEYBOARD" = 1 ] && [ -e /sys/bus/platform/drivers/i8042/i8042 ]; then
+        echo i8042 > /sys/bus/platform/drivers/i8042/unbind 2>/dev/null &&
+            echo "i8042 i8042" >> "$RUN_DIR/detached"
+    fi
+    [ -s "$RUN_DIR/detached" ] &&
+        log "disconnected while hibernating: $(awk '{ print $2 }' "$RUN_DIR/detached" | tr '\n' ' ')"
+    return 0
+}
+
+inputs_attach() {
+    local drv dev
+    [ -r "$RUN_DIR/detached" ] || return 0
+    while read -r drv dev; do
+        [ -n "$dev" ] || continue
+        if echo "$dev" > "/sys/bus/platform/drivers/$drv/bind" 2>/dev/null; then
+            log "reconnected $dev"
+        else
+            log "could not reconnect $dev ($drv); a restart brings it back"
+        fi
+    done < "$RUN_DIR/detached"
+    rm -f "$RUN_DIR/detached"
+}
+
+# Switch off wakeup for USB devices and I2C touchpads (NO_INPUT_WAKEUP), so a
+# touched mouse, keyboard or touchpad cannot cancel the hibernation.
+input_wakeup_off() {
+    local f dev names=""
+    [ "$NO_INPUT_WAKEUP" = 1 ] || return 0
+    mkdir -p "$RUN_DIR"
+    : > "$RUN_DIR/wakeup-disabled"
+    for f in /sys/bus/usb/devices/*/power/wakeup /sys/bus/i2c/devices/*/power/wakeup; do
+        [ "$(cat "$f" 2>/dev/null)" = enabled ] || continue
+        dev=$(dirname "$(dirname "$f")")
+        case $f in /sys/bus/i2c/*) readlink "$dev/driver" | grep -q i2c_hid || continue ;; esac
+        echo disabled > "$f" 2>/dev/null || continue
+        echo "$f" >> "$RUN_DIR/wakeup-disabled"
+        names="$names $(basename "$dev")"
+    done
+    [ -n "$names" ] && log "wakeup switched off while hibernating:$names"
+    return 0
+}
+
+input_wakeup_on() {
+    local f
+    [ -r "$RUN_DIR/wakeup-disabled" ] || return 0
+    while read -r f; do echo enabled > "$f" 2>/dev/null; done < "$RUN_DIR/wakeup-disabled"
+    rm -f "$RUN_DIR/wakeup-disabled"
+}
+
 # Kernel debug messages while hibernating: if a wakeup event still rolls the
 # hibernation back, the log then names its source (see learn).
 pm_debug_on() {
@@ -395,6 +469,8 @@ do_pre() {
     mkdir -p "$RUN_DIR"
     echo "$VRAM_NOW" > "$RUN_DIR/vram"
     modules_unload
+    inputs_detach
+    input_wakeup_off
     pm_debug_on
     progress_kernel
 }
@@ -438,6 +514,8 @@ learn() {
 }
 
 do_post() {
+    inputs_attach         # first: keyboard and power button back
+    input_wakeup_on
     progress_end
     pm_debug_off
     modules_reload
