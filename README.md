@@ -404,13 +404,31 @@ On Low Battery).
 
 **Keyboard shortcut:** System Settings → Keyboard → Shortcuts → Power
 Management → **Hibernate**. Works from any keyboard (built-in, USB,
-Bluetooth); KDE warns if the keys are already taken. The keyboard is only
-disconnected later, so the shortcut is not affected. Not tested yet.
+Bluetooth); KDE warns if the keys are already taken. Tested with the
+built-in and a USB keyboard: fine. Pick a combination you never type (for
+example Meta+Shift+H); a global shortcut such as Shift+Q would hibernate on
+every capital Q.
 
-**Lid:** closing the lid → Hibernate is possible but **not tested**. The lid
-also goes through the controller but is not disconnected, because
-reconnecting it could report "lid closed" and set off the lid action again.
-Keep the lid on *Shut Down* or *Do nothing* unless you test it.
+**Lid:** closing the lid → Hibernate works only partly, so it is not
+recommended:
+
+- With the lid closed, about 0.5 GB more stayed in RAM than usual; with many
+  windows open the safety check cancelled (2 attempts, nothing lost). With
+  fewer windows it worked (2 of 2).
+- After waking, the desktop left the built-in screen switched off (it turns
+  it off when the lid closes and missed the lid opening again). With
+  `SCREEN_ON_AFTER_LID=1` (default) the script switches it back on, but only
+  if the lid was closed when hibernation started and is open after waking.
+  It cannot see whether you had switched that screen off yourself before
+  closing the lid (the desktop has already turned it off by then); if you
+  keep the built-in screen off on purpose, set `SCREEN_ON_AFTER_LID=0`.
+  By hand: `kscreen-doctor output.eDP-1.enable`. (In the second test the
+  desktop switched the screen on by itself; the fallback was not needed.)
+- The lid is not disconnected like the power button, because reconnecting it
+  could report "lid closed" and set off the lid action again.
+
+Keep the lid on *Shut Down* or *Do nothing* and use the power button or a
+shortcut.
 
 **Touching things while it hibernates:** with the defaults, the built-in
 keyboard and power button are disconnected, and USB devices (mice,
@@ -453,6 +471,7 @@ cat /var/lib/hibernate-prepare/history   # date, image MiB, needed MiB, ok/faile
 | `PROGRESS` | 1 | text screen with progress and blinking Caps Lock while hibernating (0 = off; see below) |
 | `DETACH_POWER_BUTTON` | 1 | disconnect the power-button driver while hibernating (see [Power button and lid](#power-button-and-lid)) |
 | `DETACH_KEYBOARD` | 1 | disconnect the built-in keyboard controller while hibernating; the Caps Lock light stops once the kernel takes over |
+| `SCREEN_ON_AFTER_LID` | 1 | hibernated with the lid closed and woken with it open: switch the built-in screen back on (0 if you keep it off on purpose) |
 | `NO_INPUT_WAKEUP` | 1 | USB devices (mice, keyboards, receivers, Bluetooth adapter) and the touchpad cannot cancel the hibernation |
 | `PROGRESS_VT` | 8 | text console used for the progress screen |
 | `UNLOAD_MODULES` | empty | drivers unloaded while hibernating and reloaded after, for hardware that blocks the power-off; not needed on the C7VF |
