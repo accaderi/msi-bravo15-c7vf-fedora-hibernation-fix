@@ -5,7 +5,7 @@ This is the route from "Hibernate never works" to the fix in
 log lines, what each one meant, and what fixed it. If your laptop fails
 differently, the diagnostic commands at the end show where to look.
 
-Everything happened on one MSI Bravo 15 C7VF on 2026-11-20. The hardware and
+Everything happened on one MSI Bravo 15 C7VF, 2026-11-20 to 2026-11-22. The hardware and
 software are listed in the README, under *Tested on*.
 
 ---
@@ -252,6 +252,54 @@ What could and could not be shown:
   likely a matter of watching at the wrong moment, as the memory phase lasted
   only 10 s.
 
+## Step 11: the power button rolls hibernation back
+
+With the power button set to *Hibernate*, every hibernation started with it
+failed, while those started from the start menu kept working. The image was
+written completely, then the kernel undid everything in the first millisecond
+of the power-off:
+
+```
+atkbd serio0: Spurious ACK on isa0060/serio0. Some program might be trying to access hardware directly.
+PM: Image saving done
+PM: Wakeup pending, aborting suspend
+PM: last active wakeup source: PNP0C0C:00
+PM: hibernation: Wakeup event detected during hibernation, rolling back.
+WARNING: nvidia/nv.c:4688 at nv_restore_user_channels+0x4e/0x1f0 [nvidia]
+BUG: unable to handle page fault for address: 0000000000005320   (nvUpdateFlipEvoHwState [nvidia_modeset], kwin_wayland)
+```
+
+Rolling back throws the image away, and the NVIDIA driver crashes while the
+devices wake up again (step 6): black screen, orange LED, long-press, fresh
+boot.
+
+| Started from | Attempts | Result | Stray keyboard bytes (`Spurious ACK`) after the copy |
+|---|---|---|---|
+| Start menu | 31 | all ok | never |
+| Power button | 5 | all rolled back | every time |
+
+On this laptop the embedded controller handles both the power button and the
+built-in keyboard. After a press, it sent stray keyboard bytes and button
+events when the devices were woken up for writing the image, and the kernel
+counted them as user activity.
+
+Wrong turns, for the record:
+
+- Switching off wakeup for the USB receiver, touchpad, battery, PCIe ports,
+  then the keyboard, then the power button and lid did not help: the next
+  attempt failed anyway.
+- `last active wakeup source` only names the most recently active source, not
+  necessarily the cause (`serio0` one time, `PNP0C0C:00` the next).
+- The blinking Caps Lock light was suspected for a while; hibernations with
+  it from the start menu kept working.
+- One power-button attempt seemed to work, but its log shows the same
+  rollback; the desktop just happened to survive the NVIDIA warnings.
+
+**Fix:** do not hibernate with the power button (README, *Power button and
+lid*). `hibernate-prepare` turns on the kernel's debug messages
+(`/sys/power/pm_debug_messages`) while hibernating and records a rollback as
+`rolled-back` in its history, so another cause would show up in the log.
+
 ## Measurements
 
 From `/var/lib/hibernate-prepare/history` and the kernel log. The image size
@@ -274,6 +322,8 @@ the device freeze; the GPU growth is the difference.
 | calibration, progress screen | 2957 | 4667 | ok | 1710 |
 | real, progress screen | 3551 | 6050 | ok | 2499 |
 | real, progress screen + Caps Lock | 3815 | 6334 | ok | 2519 |
+| real, start menu, ~12 GB in use before | 3898 | 6572 | ok | 2673 |
+| real, power button (rolled back after writing) | 3804 | 6411 | rolled-back | 2607 |
 
 The limit on this laptop is about 7330 MiB (half of RAM minus 256 MiB). Every
 attempt that needed more failed; every attempt below it worked. The growth

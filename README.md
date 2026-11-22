@@ -64,10 +64,11 @@ working, self-adjusting hibernation.
 | NVIDIA driver | 615.71.09 *open* kernel modules (RPM Fusion `akmod-nvidia`) |
 | Secure Boot | off |
 
-Tested on 2026-11-20 with the final setup: 3 test hibernations
-(`calibrate`) and 5 real hibernations that powered off by themselves and
-resumed. The largest had about 10 GB of RAM in use, and one was resumed after
-4 hours powered off. Measurements are in
+Tested 2026-11-20 to 2026-11-22 with the final setup: 3 test hibernations
+(`calibrate`) and 8 real hibernations started from the start menu, all powered
+off by themselves and resumed. The largest had about 12 GB of RAM in use, and
+one was resumed after almost a day powered off. Hibernations started with the
+power button failed; see [Power button and lid](#power-button-and-lid). Measurements are in
 [INVESTIGATION.md](INVESTIGATION.md#measurements).
 
 **Not tested:** other RAM sizes, swap files (only a swap partition), btrfs,
@@ -378,16 +379,23 @@ heaviest GPU app open, for example a video editor with a project loaded.
 
 ### Power button and lid
 
-Like on Windows, the power button or closing the lid can hibernate:
+**Do not start hibernation with the power button on the C7VF.** It can be set
+(System Settings → Power Management → "When power button pressed" →
+Hibernate), but on this laptop every hibernation started that way failed
+(5 of 5). The image is written, then the laptop's controller sends stray
+keyboard bytes and button events, the kernel takes them as user activity and
+rolls the hibernation back, and the NVIDIA driver crashes on that path:
+black screen, orange LED, long-press, and the session is lost.
+Hibernation from the **start menu** worked every time (31 of 31). Details in
+[INVESTIGATION.md](INVESTIGATION.md#step-11-the-power-button-rolls-hibernation-back).
 
-System Settings → **Power Management** → "When power button pressed" and/or
-"When laptop lid closed" → **Hibernate**.
-
-- Set it in each profile you use: **On AC Power**, **On Battery**, **On Low
-  Battery** each have their own tab.
-- It uses the same hibernation as the menu entry, so the preparation, the
-  progress screen and the safety cancel all apply.
-- Choose plain **Hibernate**, not *Hybrid sleep* or *Sleep, then hibernate*.
+- Keep the power button on *Shut Down* or *Show logout screen* and hibernate
+  from the start menu (or the logout screen).
+- **Closing the lid** goes through the same controller and has not been tested
+  with hibernation; treat it like the power button.
+- A keyboard shortcut for hibernation (System Settings → Keyboard →
+  Shortcuts → Power Management → Hibernate) has not been tested either.
+- Always choose plain **Hibernate**, not *Hybrid sleep* or *Sleep, then hibernate*.
   Those take a different path in systemd that `hibernate-prepare` does not
   handle yet, so they would run into the original problems (image does not
   fit, NVIDIA crash).
@@ -479,6 +487,7 @@ script ignores it and continues. To turn it off: `PROGRESS=0` in
 | Black screen, orange LED, stays like that; after a long-press it boots fresh | image did not fit and the NVIDIA driver crashed (driver bug after an aborted hibernation) | same; after the reboot: `journalctl -b -1 -k \| grep -E 'PM:\|NVRM\|BUG'` |
 | Orange LED, silent, never powers off; after a long-press it **does** resume your session | power-off mode is not `platform` | `systemd-analyze cat-config systemd/sleep.conf \| grep HibernateMode`; the last one listed must be `platform` |
 | Powers off, but boots a fresh session | resume not found | Prerequisites 3; `cat /proc/cmdline` must show `resume=` |
+| Hibernation started with the **power button**: black screen, orange LED, long-press needed, then a fresh boot | the controller's stray keyboard bytes after the press make the kernel roll the hibernation back (log: `Spurious ACK on isa0060/serio0`, `Wakeup pending, aborting suspend`), and the NVIDIA driver crashes on that path | hibernate from the start menu; see [Power button and lid](#power-button-and-lid) |
 | Power button set to Hibernate does nothing | KDE's power management (PowerDevil) gets the key but ignores it; seen after a log-out screen had been left open in the background (`plasma-shutdown` and `ksmserver-logout-greeter` still running) | `systemctl --user restart plasma-powerdevil.service`, or log out and back in |
 | Power button light orange instead of white | not a fault: on MSI laptops the light is white when only the built-in AMD graphics run and orange when the NVIDIA card is on. The HDMI and USB-C display outputs are wired to the NVIDIA card, so with an external monitor plugged in it is always orange (already from the end of the MSI logo) | nothing to do; unplug the external monitors and it turns white |
 | Wi-Fi missing after waking | driver did not reinitialize | `sudo modprobe -r mt7921e && sudo modprobe mt7921e`; if it happens often, set `UNLOAD_MODULES="mt7921e"` |
