@@ -90,12 +90,29 @@ leds_restore() {
     rm -f "$RUN_DIR/leds"
 }
 
+# The kernel keeps its own Num/Caps/Scroll Lock flags per console and sets the
+# keyboard lights from them on every console switch. Under Wayland the desktop
+# sets the lights itself, so the desktop console's kernel flags are stale
+# (Num Lock as the BIOS left it). Copy the lights as they are into those
+# flags, so switching back does not change them.
+locks_sync() {
+    local k v flags=""
+    for k in num caps scroll; do
+        v=$(cat /sys/class/leds/input*::${k}lock/brightness 2>/dev/null | head -1)
+        [ "$v" = 1 ] && flags="$flags +$k" || flags="$flags -$k"
+    done
+    setleds -D $flags < "/dev/tty$1" 2>/dev/null
+}
+
 progress_start() {
     local vt
     [ "$PROGRESS" = 1 ] || return 0
     mkdir -p "$RUN_DIR"
+    vt=$(fgconsole 2>/dev/null) || vt=""
+    # before the Caps Lock light starts blinking
+    [ -n "$vt" ] && [ "$vt" != "$PROGRESS_VT" ] && locks_sync "$vt"
     leds_blink
-    vt=$(fgconsole 2>/dev/null) || return 0
+    [ -n "$vt" ] || return 0
     [ "$vt" = "$PROGRESS_VT" ] && return 0
     echo "$vt" > "$RUN_DIR/vt"
     awk '{ print $1 }' /proc/sys/kernel/printk > "$RUN_DIR/printk"
@@ -185,7 +202,9 @@ vram_used_mib() {
 # Largest measured growth and the GPU memory in use at that time: "<growth> <vram>"
 learned_growth() {
     [ -r "$HISTORY" ] || { echo "0 0"; return; }
-    awk '$5 ~ /^[0-9]+$/ && $5 > g { g = $5; v = $6 } END { printf "%d %d\n", g, v }' "$HISTORY"
+    # tr: a crash right after writing can leave zero bytes in the file
+    tr -d '\000' < "$HISTORY" |
+        awk '$5 ~ /^[0-9]+$/ && $5 > g { g = $5; v = $6 } END { printf "%d %d\n", g, v }'
 }
 
 # Compute the plan. Sets: TOTAL LIMIT GROWTH ALLOWANCE TARGET MAX_KEEP VRAM_NOW
@@ -287,6 +306,20 @@ modules_reload() {
     rm -f "$RUN_DIR/modules-unloaded"
 }
 
+# Kernel debug messages while hibernating: if a wakeup event still rolls the
+# hibernation back, the log then names its source (see learn).
+pm_debug_on() {
+    mkdir -p "$RUN_DIR"
+    cat /sys/power/pm_debug_messages > "$RUN_DIR/pm_debug" 2>/dev/null
+    echo 1 > /sys/power/pm_debug_messages 2>/dev/null
+}
+
+pm_debug_off() {
+    [ -r "$RUN_DIR/pm_debug" ] || return 0
+    cat "$RUN_DIR/pm_debug" > /sys/power/pm_debug_messages 2>/dev/null
+    rm -f "$RUN_DIR/pm_debug"
+}
+
 cancel() {
     log "CANCELLED: $1 - $2"
     [ -n "$PTTY" ] && sleep 5      # let the reason be read on the progress screen
@@ -362,6 +395,7 @@ do_pre() {
     mkdir -p "$RUN_DIR"
     echo "$VRAM_NOW" > "$RUN_DIR/vram"
     modules_unload
+    pm_debug_on
     progress_kernel
 }
 
@@ -382,6 +416,13 @@ learn() {
     needed=$(grep -o 'Normal pages needed: [0-9]*' "$RUN_DIR/last-attempt" | tail -1 | awk '{ print $4 }')
     if grep -q 'Error -12 creating image\|Not enough free memory' "$RUN_DIR/last-attempt"; then
         result=failed
+    elif grep -q 'Wakeup event detected during hibernation' "$RUN_DIR/last-attempt"; then
+        result=rolled-back
+        # "last active" is only the most recent wakeup source, often not the
+        # cause; stray keyboard bytes ("Spurious ACK") came with every rollback
+        # after a power-button press on the MSI Bravo 15 C7VF
+        log "hibernation was rolled back by a wakeup event:" \
+            "$(grep -o 'active wakeup source: .*\|Spurious ACK on [^ .]*' "$RUN_DIR/last-attempt" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
     else
         result=ok
     fi
@@ -390,6 +431,7 @@ learn() {
         growth=$(( (needed - alloc) * 4 / 1024 )); [ $growth -lt 0 ] && growth=0
         # date  alloc_MiB  needed_MiB  result  growth_MiB  gpu_mem_MiB
         echo "$(date '+%F_%T') $(( alloc * 4 / 1024 )) $(( needed * 4 / 1024 )) $result $growth $vram" >> "$HISTORY"
+        sync "$HISTORY"
         log "learned: image ${result}, sized $(( alloc * 4 / 1024 )) MiB, needed $(( needed * 4 / 1024 )) MiB," \
             "GPU growth ${growth} MiB (GPU memory in use ${vram} MiB)"
     fi
@@ -397,6 +439,7 @@ learn() {
 
 do_post() {
     progress_end
+    pm_debug_off
     modules_reload
     zram_on
     learn
@@ -450,7 +493,7 @@ EOF
     if [ -r "$HISTORY" ]; then
         echo
         echo "Last attempts (date, image MiB, needed MiB, result, GPU growth MiB, GPU memory MiB):"
-        tail -5 "$HISTORY"
+        tr -d '\000' < "$HISTORY" | tail -5
     fi
 }
 
