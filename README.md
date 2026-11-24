@@ -458,7 +458,8 @@ cat /var/lib/hibernate-prepare/history   # date, image MiB, needed MiB, ok/faile
 
 ## Settings
 
-`/etc/hibernate-prepare.conf` (uncomment to change):
+`/etc/hibernate-prepare.conf` (uncomment to change; the file explains every
+setting, with its values and when to change it):
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -467,6 +468,9 @@ cat /var/lib/hibernate-prepare/history   # date, image MiB, needed MiB, ok/faile
 | `GROWTH_FACTOR_PCT` | 125 | safety factor on the growth for the *target* |
 | `EXTRA_MARGIN_MIB` | 512 | fixed extra margin |
 | `MAX_SECONDS` | 120 | time limit for pushing memory to disk |
+| `RESERVED_MIB` | 1024 | RAM kept free for drivers while devices are frozen (`/sys/power/reserved_size`) |
+| `LIMIT_SLACK_MIB` | 256 | keep the image this far below half of RAM |
+| `IMAGE_RATIO_PCT` | 70 | expected compressed image size vs. memory, for the swap-space check |
 | `NOTIFY` | 1 | desktop notification when cancelled (0 = off) |
 | `PROGRESS` | 1 | text screen with progress and blinking Caps Lock while hibernating (0 = off; see below) |
 | `DETACH_POWER_BUTTON` | 1 | disconnect the power-button driver while hibernating (see [Power button and lid](#power-button-and-lid)) |
