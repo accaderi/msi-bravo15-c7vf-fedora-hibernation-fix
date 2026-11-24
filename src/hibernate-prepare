@@ -472,8 +472,11 @@ diagnose_attempt() {
     local f="$RUN_DIR/last-attempt"
     [ -r "$f" ] || return 0
     log "diagnose: $(grep -o 'freeze of devices complete after [0-9.]* msecs' "$f" | head -1),"         "$(grep -o 'Allocated [0-9]* kbytes in [0-9.]* seconds' "$f" | tail -1)"
-    log "diagnose: slowest devices to freeze: $(grep -o 'call [^ ]* returned [-0-9]* after [0-9]* usecs' "$f" |
-        sort -t' ' -k6 -rn | head -5 | awk '{ printf "%s %d ms; ", $2, $6 / 1000 }')"
+    # lines like "amdgpu 0000:05:00.0: PM: pci_pm_freeze returned 0 after 9202204 usecs"
+    log "diagnose: slowest devices: $(grep -E 'PM: [a-z_]+ (\[[^]]*\] )?returned -?[0-9]+ after [0-9]+ usecs' "$f" |
+        sed -E 's/^\[ *[0-9.]+\] //' |
+        awk '{ for (i = 1; i <= NF; i++) if ($i == "after") u = $(i + 1); print u, $1, $2, $4 }' |
+        sort -rn | head -5 | awk '{ printf "%s %s %s %d ms; ", $2, $3, $4, $1 / 1000 }')"
     log "diagnose: driver warnings: $(grep -c 'WARNING\|vmalloc error\|failed to allocate\|ret=-12' "$f")"         "$(grep -o 'vmalloc error[^,]*\|\[drm\] [^:]*failed: ret=-12' "$f" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
 }
 

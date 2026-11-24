@@ -337,6 +337,15 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   the image. Attempts needing 7642 MiB worked, 8009 and 8260 MiB failed.
   Using the largest measured growth instead of the 3072 MiB default would
   have allowed more than that, so it was not done.
+- First run with the diagnostics (2026-11-24 07:42, worked): of 3590 MiB left
+  in RAM, 2182 MiB were the integrated GPU's GTT buffers and 457 MiB its VRAM;
+  application memory was down to ~40 MiB. During the device freeze the image
+  grew by 2823 MiB, and `amdgpu 0000:05:00.0: pci_pm_freeze` took 9.2 of the
+  9.2 s of the freeze: the amdgpu driver copies its buffers into RAM while
+  freezing. So the "GPU growth" is amdgpu, and it scales with the GTT in use,
+  which changes from minute to minute (1.3-2.2 GB seen within an hour with the
+  same apps open) - that is why the same session can fit at one try and not
+  at the next.
 - Added `DIAGNOSE=1`: the memory that stays in RAM is logged before every
   attempt, and after waking the slowest devices and driver warnings; the
   history gets "left in RAM" and the kernel's "available pages", and
