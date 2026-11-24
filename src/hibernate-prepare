@@ -56,6 +56,8 @@ SCREEN_ON_AFTER_LID=1     # hibernated with the lid closed and woken with it
                           # open: switch the built-in screen back on (the
                           # desktop turns it off on closing and may not
                           # turn it on again)
+MODEL_RUNS=3              # runs with GPU memory recorded before the learned
+                          # memory model decides instead of the fixed allowance
 DIAGNOSE=1                # log the memory that cannot be swapped out, and after
                           # waking the slowest devices and driver warnings
                           # (for finding what limits hibernation; 0 = off)
@@ -469,6 +471,36 @@ gpu_gtt() {
     echo $t
 }
 
+# Video memory (VRAM) of the graphics cards that report it in sysfs (amdgpu), MiB
+gpu_vram() {
+    local c t=0
+    for c in /sys/class/drm/card[0-9]*/device/mem_info_vram_used; do
+        [ -r "$c" ] && t=$(( t + $(cat "$c") / 1048576 ))
+    done
+    echo $t
+}
+
+# The memory model learned from the history (runs that recorded GTT and VRAM):
+#   image  = left in RAM + OFFSET        (the kernel's image vs. "in use")
+#   needed = image + GTT + VRAM + RESID  (amdgpu copies its buffers into RAM
+#                                         while freezing, plus a little more)
+#   SAFE   = largest "needed" that has worked on this machine
+# Prints "<runs> <OFFSET> <RESID> <SAFE>"; runs < MODEL_RUNS means not active yet.
+memory_model() {
+    [ -r "$HISTORY" ] || { echo "0 0 0 0"; return; }
+    tr -d '\000' < "$HISTORY" | awk '
+        $4 == "ok" && $3 > safe { safe = $3 }
+        $4 == "failed" && (fail == 0 || $3 < fail) { fail = $3 }
+        $4 == "ok" && NF >= 10 && $7 > 0 {
+            n++; o = $2 - $7; if (o > off) off = o
+            r = $5 - $9 - $10; if (r > res) res = r
+        }
+        END {
+            if (fail && safe > fail - 256) safe = fail - 256    # never near a size that failed
+            printf "%d %d %d %d\n", n, off, res, safe
+        }'
+}
+
 # What stays in RAM and why, in one log line (DIAGNOSE=1).
 diagnose_memory() {
     local k parts="" c name
@@ -513,7 +545,7 @@ $2"
 
 do_pre() {
     local used zram swap_size swap_used swap_free push image_disk need suggest
-    local end last stalls step gpu_start
+    local end last stalls step gpu_start gtt_end vram_end runs off res safe predicted
     gpu_start=$(gpu_mem)                   # before the progress screen takes over
     progress_start
     [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU memory at the start: ${gpu_start}after the screen switch: $(gpu_mem)"
@@ -577,12 +609,26 @@ do_pre() {
     [ "$DIAGNOSE" = 1 ] && diagnose_memory
     mkdir -p "$RUN_DIR"
     echo "$used" > "$RUN_DIR/left"
+    gtt_end=$(gpu_gtt); vram_end=$(gpu_vram)
+    echo "$gtt_end $vram_end" > "$RUN_DIR/gpu"
 
     # Not reaching TARGET is normal: kernel, driver and desktop memory cannot
     # be swapped out and varies a few hundred MiB between attempts.
-    [ $used -le $MAX_KEEP ] || cancel \
-        "Not enough memory could be moved to disk (${used} MiB left in RAM, at most ${MAX_KEEP} MiB fits)." \
-        "What is left cannot be swapped out (kernel, GPU drivers, desktop). Close graphics-heavy apps and try again."
+    # Once the history has enough runs with GTT and VRAM recorded, the decision
+    # uses what the GPU holds right now instead of the fixed worst case.
+    read -r runs off res safe < <(memory_model)
+    if [ "$runs" -ge "$MODEL_RUNS" ]; then
+        predicted=$(( used + off + gtt_end + vram_end + res ))
+        log "decision by the memory model ($runs runs): needed about ${predicted} MiB" \
+            "(left ${used} + ${off} + GPU ${gtt_end}+${vram_end} + ${res}), largest that worked ${safe} MiB"
+        [ $predicted -le $safe ] || cancel \
+            "The image would need about ${predicted} MiB, more than has ever worked here (${safe} MiB)." \
+            "What is left cannot be swapped out (kernel, GPU drivers, desktop). Close windows (above all video and big windows on large screens) and try again."
+    else
+        [ $used -le $MAX_KEEP ] || cancel \
+            "Not enough memory could be moved to disk (${used} MiB left in RAM, at most ${MAX_KEEP} MiB fits)." \
+            "What is left cannot be swapped out (kernel, GPU drivers, desktop). Close graphics-heavy apps and try again."
+    fi
 
     mkdir -p "$RUN_DIR"
     echo "$VRAM_NOW" > "$RUN_DIR/vram"
@@ -595,7 +641,7 @@ do_pre() {
 
 # Read the last hibernation attempt from the kernel log and record it.
 learn() {
-    local entry alloc needed result vram growth left avail
+    local entry alloc needed result vram growth left avail gpu
     entry=$(dmesg | grep 'PM: hibernation: hibernation entry' | tail -1 | sed 's/^\[ *\([0-9.]*\)\].*/\1/')
     [ -n "$entry" ] || return 0
     [ "$entry" = "$(cat "$RUN_DIR/learned-entry" 2>/dev/null)" ] && return 0
@@ -623,11 +669,12 @@ learn() {
     fi
     vram=$(cat "$RUN_DIR/vram" 2>/dev/null || echo 0)
     left=$(cat "$RUN_DIR/left" 2>/dev/null || echo 0)
+    gpu=$(cat "$RUN_DIR/gpu" 2>/dev/null || echo "0 0")
     if [ -n "$alloc" ] && [ -n "$needed" ]; then
         growth=$(( (needed - alloc) * 4 / 1024 )); [ $growth -lt 0 ] && growth=0
-        # date  alloc_MiB  needed_MiB  result  growth_MiB  gpu_mem_MiB  left_MiB  available_MiB
+        # date alloc needed result growth gpu_mem left available gtt vram  (MiB)
         echo "$(date '+%F_%T') $(( alloc * 4 / 1024 )) $(( needed * 4 / 1024 )) $result $growth $vram" \
-             "$left $(( ${avail:-0} * 4 / 1024 ))" >> "$HISTORY"
+             "$left $(( ${avail:-0} * 4 / 1024 )) $gpu" >> "$HISTORY"
         sync "$HISTORY"
         log "learned: image ${result}, sized $(( alloc * 4 / 1024 )) MiB, needed $(( needed * 4 / 1024 )) MiB," \
             "GPU growth ${growth} MiB (GPU memory in use ${vram} MiB)"
@@ -676,7 +723,7 @@ EOF
 }
 
 do_status() {
-    local used zram swap_size swap_used
+    local used zram swap_size swap_used runs off res safe
     plan
     used=$(used_mib); zram=$(zram_data_mib)
     read -r swap_size swap_used < <(disk_swap_mib)
@@ -708,8 +755,15 @@ EOF
                 printf "Largest image that worked: %d MiB needed%s\n", okmax, failmin ? sprintf(", smallest that failed: %d MiB", failmin) : ""
                 printf "So left in RAM can be up to about %d MiB (cancel above is %d now)\n", okmax / ratio - off, cur
             }'
+        read -r runs off res safe < <(memory_model)
+        if [ "$runs" -ge "$MODEL_RUNS" ]; then
+            echo "Memory model (decides, from $runs runs): needed = left in RAM + $off + GPU GTT + VRAM + $res;" \
+                 "allowed up to $safe MiB"
+        else
+            echo "Memory model: $runs of $MODEL_RUNS runs with GPU memory recorded; until then the fixed limit decides"
+        fi
         echo
-        echo "Last attempts (date, image MiB, needed MiB, result, GPU growth MiB, GPU memory MiB, left MiB, available MiB):"
+        echo "Last attempts (date, image, needed, result, GPU growth, GPU memory, left, available, GTT, VRAM; MiB):"
         tr -d '\000' < "$HISTORY" | tail -5
     fi
 }

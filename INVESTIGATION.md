@@ -346,6 +346,26 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   which changes from minute to minute (1.3-2.2 GB seen within an hour with the
   same apps open) - that is why the same session can fit at one try and not
   at the next.
+- With the GPU memory logged at each step (three runs, 07:42-08:16):
+  the screen switch to the progress screen adds nothing (also tested alone:
+  5 s on VT 8 and back); the first step of pushing memory to disk makes the
+  amdgpu GTT jump by 350-470 MiB, then it stays. And the growth during the
+  device freeze is the amdgpu buffers plus about 200 MiB:
+
+  | left in RAM | GTT + VRAM after the push | growth while freezing | rest |
+  |---|---|---|---|
+  | 3590 | 2182 + 457 | 2823 | 184 |
+  | 3436 | 2054 + 480 | 2734 | 200 |
+  | 3129 | 1644 + 483 | 2338 | 211 |
+
+  So the script can predict the image from what the GPU holds right before
+  hibernating: needed = left + offset + GTT + VRAM + rest (offset ~554 MiB,
+  learned from the history like the rest). `MODEL_RUNS=3`: after three runs
+  with these numbers recorded, that prediction decides, against the largest
+  image that has worked (7642 MiB, never within 256 MiB of one that failed).
+  On these numbers, the attempt refused at 3994 MiB in the morning would have
+  needed about 7339 MiB and been allowed; one with much more GPU memory than
+  usual is refused even below the old fixed limit.
 - Added `DIAGNOSE=1`: the memory that stays in RAM is logged before every
   attempt, and after waking the slowest devices and driver warnings; the
   history gets "left in RAM" and the kernel's "available pages", and
