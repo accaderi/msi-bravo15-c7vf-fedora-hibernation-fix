@@ -58,6 +58,8 @@ SCREEN_ON_AFTER_LID=1     # hibernated with the lid closed and woken with it
                           # turn it on again)
 MODEL_RUNS=3              # runs with GPU memory recorded before the learned
                           # memory model decides instead of the fixed allowance
+MODEL_MARGIN_MIB=128      # added to the model's prediction (it once came out
+                          # 51 MiB low before learning from that run)
 DIAGNOSE=1                # log the memory that cannot be swapped out, and after
                           # waking the slowest devices and driver warnings
                           # (for finding what limits hibernation; 0 = off)
@@ -618,9 +620,10 @@ do_pre() {
     # uses what the GPU holds right now instead of the fixed worst case.
     read -r runs off res safe < <(memory_model)
     if [ "$runs" -ge "$MODEL_RUNS" ]; then
-        predicted=$(( used + off + gtt_end + vram_end + res ))
+        predicted=$(( used + off + gtt_end + vram_end + res + MODEL_MARGIN_MIB ))
         log "decision by the memory model ($runs runs): needed about ${predicted} MiB" \
-            "(left ${used} + ${off} + GPU ${gtt_end}+${vram_end} + ${res}), largest that worked ${safe} MiB"
+            "(left ${used} + ${off} + GPU ${gtt_end}+${vram_end} + ${res} + margin ${MODEL_MARGIN_MIB})," \
+            "largest that worked ${safe} MiB"
         [ $predicted -le $safe ] || cancel \
             "The image would need about ${predicted} MiB, more than has ever worked here (${safe} MiB)." \
             "What is left cannot be swapped out (kernel, GPU drivers, desktop). Close windows (above all video and big windows on large screens) and try again."
@@ -757,8 +760,8 @@ EOF
             }'
         read -r runs off res safe < <(memory_model)
         if [ "$runs" -ge "$MODEL_RUNS" ]; then
-            echo "Memory model (decides, from $runs runs): needed = left in RAM + $off + GPU GTT + VRAM + $res;" \
-                 "allowed up to $safe MiB"
+            echo "Memory model (decides, from $runs runs): needed = left in RAM + $off + GPU GTT + VRAM + $res" \
+                 "+ margin $MODEL_MARGIN_MIB; allowed up to $safe MiB (the fixed \"cancel above\" is not used)"
         else
             echo "Memory model: $runs of $MODEL_RUNS runs with GPU memory recorded; until then the fixed limit decides"
         fi

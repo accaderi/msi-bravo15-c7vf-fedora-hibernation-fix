@@ -366,6 +366,10 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   On these numbers, the attempt refused at 3994 MiB in the morning would have
   needed about 7339 MiB and been allowed; one with much more GPU memory than
   usual is refused even below the old fixed limit.
+- First decision by the model (08:26): predicted 6927 MiB, needed 6978 (51
+  low: that run's offset was 590 and its rest 225, both above the earlier
+  maximum; the model learns maxima). Added a fixed margin of 128 MiB
+  (`MODEL_MARGIN_MIB`) on top of the prediction.
 - Added `DIAGNOSE=1`: the memory that stays in RAM is logged before every
   attempt, and after waking the slowest devices and driver warnings; the
   history gets "left in RAM" and the kernel's "available pages", and
