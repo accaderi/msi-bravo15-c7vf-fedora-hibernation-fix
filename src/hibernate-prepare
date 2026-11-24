@@ -460,6 +460,15 @@ gpu_mem() {
     echo "${out:-none}"
 }
 
+# GTT of all graphics cards together (MiB)
+gpu_gtt() {
+    local c t=0
+    for c in /sys/class/drm/card[0-9]*/device/mem_info_gtt_used; do
+        [ -r "$c" ] && t=$(( t + $(cat "$c") / 1048576 ))
+    done
+    echo $t
+}
+
 # What stays in RAM and why, in one log line (DIAGNOSE=1).
 diagnose_memory() {
     local k parts="" c name
@@ -538,8 +547,11 @@ do_pre() {
     echo $(( TARGET * 1048576 )) > /sys/power/image_size
 
     zram_off || cancel "Could not turn off zram swap." "See $LOG."
+    local trace=""                         # GPU memory along the way (DIAGNOSE=1)
+    [ "$DIAGNOSE" = 1 ] && trace="zram off: $(gpu_gtt)"
     sync
     echo 1 > /proc/sys/vm/drop_caches
+    [ "$DIAGNOSE" = 1 ] && trace="$trace, caches dropped: $(gpu_gtt)"
 
     # Push memory out to disk swap until "in use" is at or below the target.
     end=$(( SECONDS + MAX_SECONDS )); last=$(used_mib); stalls=0
@@ -555,11 +567,13 @@ do_pre() {
             stalls=0
         fi
         last=$(used_mib)
+        [ "$DIAGNOSE" = 1 ] && trace="$trace, in use $last: $(gpu_gtt)"
         [ -n "$PTTY" ] && printf '\r     in RAM: %6d MiB   goal: %d MiB   ' "$last" "$TARGET" > "$PTTY" 2>/dev/null
     done
     say ""
     used=$(used_mib)
     log "in use after pushing to disk: ${used} MiB (target ${TARGET} MiB)"
+    [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU GTT (MiB) after $trace"
     [ "$DIAGNOSE" = 1 ] && diagnose_memory
     mkdir -p "$RUN_DIR"
     echo "$used" > "$RUN_DIR/left"
