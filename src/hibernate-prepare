@@ -448,6 +448,18 @@ pm_debug_off() {
     fi
 }
 
+# Memory of the graphics cards' own drivers in RAM now (GTT) and in their
+# video memory, for example "card1 gtt 1325 vram 482" (MiB).
+gpu_mem() {
+    local c out=""
+    for c in /sys/class/drm/card[0-9]*/device; do
+        [ -r "$c/mem_info_gtt_used" ] || continue
+        out="$out$(basename "$(dirname "$c")") gtt $(( $(cat "$c/mem_info_gtt_used") / 1048576 ))"
+        out="$out vram $(( $(cat "$c/mem_info_vram_used") / 1048576 )); "
+    done
+    echo "${out:-none}"
+}
+
 # What stays in RAM and why, in one log line (DIAGNOSE=1).
 diagnose_memory() {
     local k parts="" c name
@@ -492,8 +504,10 @@ $2"
 
 do_pre() {
     local used zram swap_size swap_used swap_free push image_disk need suggest
-    local end last stalls step
+    local end last stalls step gpu_start
+    gpu_start=$(gpu_mem)                   # before the progress screen takes over
     progress_start
+    [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU memory at the start: ${gpu_start}after the screen switch: $(gpu_mem)"
     lid_note
     plan
     used=$(used_mib)
