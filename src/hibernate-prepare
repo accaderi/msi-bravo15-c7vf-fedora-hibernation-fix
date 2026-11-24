@@ -56,6 +56,9 @@ SCREEN_ON_AFTER_LID=1     # hibernated with the lid closed and woken with it
                           # open: switch the built-in screen back on (the
                           # desktop turns it off on closing and may not
                           # turn it on again)
+DIAGNOSE=1                # log the memory that cannot be swapped out, and after
+                          # waking the slowest devices and driver warnings
+                          # (for finding what limits hibernation; 0 = off)
 # ------------------------------------------------------------------------------
 [ -r /etc/hibernate-prepare.conf ] && . /etc/hibernate-prepare.conf
 
@@ -429,12 +432,49 @@ pm_debug_on() {
     mkdir -p "$RUN_DIR"
     cat /sys/power/pm_debug_messages > "$RUN_DIR/pm_debug" 2>/dev/null
     echo 1 > /sys/power/pm_debug_messages 2>/dev/null
+    if [ "$DIAGNOSE" = 1 ]; then          # per-device times, read back by diagnose_attempt
+        cat /sys/power/pm_print_times > "$RUN_DIR/pm_times" 2>/dev/null
+        echo 1 > /sys/power/pm_print_times 2>/dev/null
+    fi
 }
 
 pm_debug_off() {
     [ -r "$RUN_DIR/pm_debug" ] || return 0
     cat "$RUN_DIR/pm_debug" > /sys/power/pm_debug_messages 2>/dev/null
     rm -f "$RUN_DIR/pm_debug"
+    if [ -r "$RUN_DIR/pm_times" ]; then
+        cat "$RUN_DIR/pm_times" > /sys/power/pm_print_times 2>/dev/null
+        rm -f "$RUN_DIR/pm_times"
+    fi
+}
+
+# What stays in RAM and why, in one log line (DIAGNOSE=1).
+diagnose_memory() {
+    local k parts="" c name
+    for k in MemFree Cached SwapCached Shmem AnonPages Mapped SUnreclaim PageTables KernelStack VmallocUsed; do
+        parts="$parts $k=$(( $(meminfo_kib $k) / 1024 ))"
+    done
+    for c in /sys/class/drm/card[0-9]*/device; do
+        [ -r "$c/mem_info_gtt_used" ] || continue
+        name=$(basename "$(dirname "$c")")
+        parts="$parts ${name}_vram=$(( $(cat "$c/mem_info_vram_used") / 1048576 ))"
+        parts="$parts ${name}_gtt=$(( $(cat "$c/mem_info_gtt_used") / 1048576 ))"
+    done
+    if command -v nvidia-smi >/dev/null && [ -e /proc/driver/nvidia ]; then
+        parts="$parts nvidia=$(timeout 10 nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    fi
+    log "diagnose (MiB):$parts"
+}
+
+# After waking: how long the devices took to freeze, the slowest ones, and
+# driver warnings (memory allocation failures) from the last attempt.
+diagnose_attempt() {
+    local f="$RUN_DIR/last-attempt"
+    [ -r "$f" ] || return 0
+    log "diagnose: $(grep -o 'freeze of devices complete after [0-9.]* msecs' "$f" | head -1),"         "$(grep -o 'Allocated [0-9]* kbytes in [0-9.]* seconds' "$f" | tail -1)"
+    log "diagnose: slowest devices to freeze: $(grep -o 'call [^ ]* returned [-0-9]* after [0-9]* usecs' "$f" |
+        sort -t' ' -k6 -rn | head -5 | awk '{ printf "%s %d ms; ", $2, $6 / 1000 }')"
+    log "diagnose: driver warnings: $(grep -c 'WARNING\|vmalloc error\|failed to allocate\|ret=-12' "$f")"         "$(grep -o 'vmalloc error[^,]*\|\[drm\] [^:]*failed: ret=-12' "$f" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
 }
 
 cancel() {
@@ -503,6 +543,9 @@ do_pre() {
     say ""
     used=$(used_mib)
     log "in use after pushing to disk: ${used} MiB (target ${TARGET} MiB)"
+    [ "$DIAGNOSE" = 1 ] && diagnose_memory
+    mkdir -p "$RUN_DIR"
+    echo "$used" > "$RUN_DIR/left"
 
     # Not reaching TARGET is normal: kernel, driver and desktop memory cannot
     # be swapped out and varies a few hundred MiB between attempts.
@@ -521,7 +564,7 @@ do_pre() {
 
 # Read the last hibernation attempt from the kernel log and record it.
 learn() {
-    local entry alloc needed result vram growth
+    local entry alloc needed result vram growth left avail
     entry=$(dmesg | grep 'PM: hibernation: hibernation entry' | tail -1 | sed 's/^\[ *\([0-9.]*\)\].*/\1/')
     [ -n "$entry" ] || return 0
     [ "$entry" = "$(cat "$RUN_DIR/learned-entry" 2>/dev/null)" ] && return 0
@@ -534,6 +577,7 @@ learn() {
         s' > "$RUN_DIR/last-attempt"
     alloc=$(grep -o 'Allocated [0-9]* pages for snapshot' "$RUN_DIR/last-attempt" | tail -1 | awk '{ print $2 }')
     needed=$(grep -o 'Normal pages needed: [0-9]*' "$RUN_DIR/last-attempt" | tail -1 | awk '{ print $4 }')
+    avail=$(grep -o 'available pages: [0-9]*' "$RUN_DIR/last-attempt" | tail -1 | awk '{ print $3 }')
     if grep -q 'Error -12 creating image\|Not enough free memory' "$RUN_DIR/last-attempt"; then
         result=failed
     elif grep -q 'Wakeup event detected during hibernation' "$RUN_DIR/last-attempt"; then
@@ -547,14 +591,17 @@ learn() {
         result=ok
     fi
     vram=$(cat "$RUN_DIR/vram" 2>/dev/null || echo 0)
+    left=$(cat "$RUN_DIR/left" 2>/dev/null || echo 0)
     if [ -n "$alloc" ] && [ -n "$needed" ]; then
         growth=$(( (needed - alloc) * 4 / 1024 )); [ $growth -lt 0 ] && growth=0
-        # date  alloc_MiB  needed_MiB  result  growth_MiB  gpu_mem_MiB
-        echo "$(date '+%F_%T') $(( alloc * 4 / 1024 )) $(( needed * 4 / 1024 )) $result $growth $vram" >> "$HISTORY"
+        # date  alloc_MiB  needed_MiB  result  growth_MiB  gpu_mem_MiB  left_MiB  available_MiB
+        echo "$(date '+%F_%T') $(( alloc * 4 / 1024 )) $(( needed * 4 / 1024 )) $result $growth $vram" \
+             "$left $(( ${avail:-0} * 4 / 1024 ))" >> "$HISTORY"
         sync "$HISTORY"
         log "learned: image ${result}, sized $(( alloc * 4 / 1024 )) MiB, needed $(( needed * 4 / 1024 )) MiB," \
             "GPU growth ${growth} MiB (GPU memory in use ${vram} MiB)"
     fi
+    [ "$DIAGNOSE" = 1 ] && diagnose_attempt
 }
 
 do_post() {
@@ -615,7 +662,23 @@ Disk swap                ${swap_used} of ${swap_size} MiB used
 EOF
     if [ -r "$HISTORY" ]; then
         echo
-        echo "Last attempts (date, image MiB, needed MiB, result, GPU growth MiB, GPU memory MiB):"
+        # What the history says: the image grows during the device freeze by a
+        # share of its own size, and the kernel's image is a bit larger than
+        # what was left in RAM. From that, the largest "left in RAM" that
+        # stays within the largest image that ever worked.
+        tr -d '\000' < "$HISTORY" | awk -v cur="$MAX_KEEP" '
+            $4 == "ok" && $2 > 0 { r = $3 / $2; if (r > ratio) ratio = r; if ($3 > okmax) okmax = $3 }
+            $4 == "failed" && (failmin == 0 || $3 < failmin) { failmin = $3 }
+            NF >= 7 && $7 > 0 { o = $2 - $7; if (o > off) off = o; n++ }
+            END {
+                if (!ratio) exit
+                if (!n) off = 600           # until measured: about what the first runs showed
+                printf "Measured: needed = up to %.2f x the image; image = left in RAM + up to %d MiB%s\n", ratio, off, n ? "" : " (assumed)"
+                printf "Largest image that worked: %d MiB needed%s\n", okmax, failmin ? sprintf(", smallest that failed: %d MiB", failmin) : ""
+                printf "So left in RAM can be up to about %d MiB (cancel above is %d now)\n", okmax / ratio - off, cur
+            }'
+        echo
+        echo "Last attempts (date, image MiB, needed MiB, result, GPU growth MiB, GPU memory MiB, left MiB, available MiB):"
         tr -d '\000' < "$HISTORY" | tail -5
     fi
 }

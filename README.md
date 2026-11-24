@@ -476,6 +476,7 @@ setting, with its values and when to change it):
 | `DETACH_POWER_BUTTON` | 1 | disconnect the power-button driver while hibernating (see [Power button and lid](#power-button-and-lid)) |
 | `DETACH_KEYBOARD` | 1 | disconnect the built-in keyboard controller while hibernating; the Caps Lock light stops once the kernel takes over |
 | `SCREEN_ON_AFTER_LID` | 1 | hibernated with the lid closed and woken with it open: switch the built-in screen back on (0 if you keep it off on purpose) |
+| `DIAGNOSE` | 1 | log what stays in RAM (kernel, GPU memory) before hibernating, and after waking the slowest devices and driver warnings; `status` then also shows how much may stay in RAM according to your own history (0 = off) |
 | `NO_INPUT_WAKEUP` | 1 | USB devices (mice, keyboards, receivers, Bluetooth adapter) and the touchpad cannot cancel the hibernation |
 | `PROGRESS_VT` | 8 | text console used for the progress screen |
 | `UNLOAD_MODULES` | empty | drivers unloaded while hibernating and reloaded after, for hardware that blocks the power-off; not needed on the C7VF |

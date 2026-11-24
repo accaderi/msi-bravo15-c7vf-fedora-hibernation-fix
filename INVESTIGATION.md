@@ -320,6 +320,28 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
 (`/sys/power/pm_debug_messages`) while hibernating and records a rollback as
 `rolled-back` in its history, so another cause would show up in the log.
 
+## Step 12: a cancel and a hang on 2026-11-23/24, and what the history shows
+
+- 2026-11-23 21:19, from the start menu: everything prepared normally (3610
+  MiB left in RAM), then the machine hung after "hibernation entry": screens
+  off, fans quiet, no image on the swap (the next boot found none), long
+  press needed. The kernel log of a frozen attempt is lost, so the cause is
+  open. A successful run the same afternoon showed memory allocation failures
+  in the amdgpu driver while the image memory was reserved (`vmalloc error`,
+  `[drm] Dirty helper failed: ret=-12`), so memory is tight at that moment.
+- 2026-11-24, twice: cancelled, 3994 and 3817 MiB left in RAM (allowed: 3746).
+  The integrated GPU alone held 1730 MiB of RAM (amdgpu `mem_info_gtt_used`),
+  most likely for the compositor (three screens, one of them 4K).
+- The history (33 attempts) shows that the "GPU growth" is not a fixed amount:
+  it is about 0.6-0.7 x the image size, so the total needed is about 1.6-1.7 x
+  the image. Attempts needing 7642 MiB worked, 8009 and 8260 MiB failed.
+  Using the largest measured growth instead of the 3072 MiB default would
+  have allowed more than that, so it was not done.
+- Added `DIAGNOSE=1`: the memory that stays in RAM is logged before every
+  attempt, and after waking the slowest devices and driver warnings; the
+  history gets "left in RAM" and the kernel's "available pages", and
+  `status` computes the largest safe "left in RAM" from them.
+
 ## Measurements
 
 From `/var/lib/hibernate-prepare/history` and the kernel log. The image size
