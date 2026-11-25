@@ -374,6 +374,18 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   attempt, and after waking the slowest devices and driver warnings; the
   history gets "left in RAM" and the kernel's "available pages", and
   `status` computes the largest safe "left in RAM" from them.
+- 2026-11-25, after the kernel 7.3.4 / NVIDIA 620.70 update: one attempt was
+  refused by the model (about 7780 MiB needed, above 7642; Radeon GTT 2353
+  MiB at the start), the next one after closing apps and moving windows
+  worked (6155 MiB, GTT 1167). KWin draws every screen on the Radeon, the
+  external monitors included (it uses 7 MiB on the NVIDIA card), so windows
+  cost Radeon GTT on any screen. Observation by the user: refused runs showed
+  the progress screen in small letters, working ones in the double-size
+  font. The successful run logged `vmalloc error: size 368640` and
+  `[drm] Dirty helper failed: ret=-12`; loading the double-size font needs
+  kernel memory, so a failing `setfont` would explain the small letters.
+  `DIAGNOSE=1` now logs the font result, the text screen size and
+  VmallocUsed when the progress screen starts.
 
 ## Measurements
 

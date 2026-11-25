@@ -146,9 +146,17 @@ progress_start() {
         progress_end; return 0
     fi
     PTTY=/dev/tty$PROGRESS_VT
-    setfont -C "$PTTY" -d eurlatgr 2>/dev/null    # double size, readable on 1080p
+    local font_err font_rc
+    font_err=$(setfont -C "$PTTY" -d eurlatgr 2>&1)    # double size, readable on 1080p
+    font_rc=$?
     printf '\033[2J\033[H' > "$PTTY" 2>/dev/null
     log "progress screen: VT $vt -> VT $PROGRESS_VT, now on VT $(fgconsole 2>/dev/null)"
+    # Small letters on the progress screen came with runs that were cancelled
+    # for memory: loading the bigger font needs kernel memory (vmalloc), so a
+    # failure here would show that memory is short before anything is moved.
+    [ "$DIAGNOSE" = 1 ] && log "diagnose: text screen $(stty size < "$PTTY" 2>/dev/null |
+        awk '{ print $2 "x" $1 }') characters, double-size font $( [ "$font_rc" = 0 ] && echo loaded ||
+        echo "FAILED ($font_rc: $(echo "$font_err" | tr '\n' ' '))"), VmallocUsed $(( $(meminfo_kib VmallocUsed) / 1024 )) MiB"
     say "HIBERNATING - do not touch the keyboard, touchpad, mouse or"
     say "power button until the laptop is off."
     say "(Caps Lock blinks while memory is moved; when the screen goes black,"
