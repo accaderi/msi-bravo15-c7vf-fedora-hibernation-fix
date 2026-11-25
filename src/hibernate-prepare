@@ -294,9 +294,13 @@ in_sessions() {
 }
 
 # plasma-reopen-windows, where a user has it: "before" minimizes the shown
-# windows so the graphics memory they hold in RAM is freed (a maximized video
-# on a 4K screen: about 300 MiB on the Radeon, measured), "after" shows them
+# windows so the graphics memory they hold in RAM is freed, "after" shows them
 # again. Its own setting (hibernate_minimize) decides; without it, nothing.
+# Measured: a playing video window gives back about 100 MiB, but only 20-26 s
+# after it is minimized, and the desktop shown instead costs about 45 MiB; so
+# this is tried only when the image would otherwise not fit (windows_rescue).
+# Sets MINIMIZED=1 when windows were minimized.
+MINIMIZED=0
 windows_hook() {
     local sid user uid home bin b out
     for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
@@ -310,10 +314,24 @@ windows_hook() {
             [ -x "$b" ] && { bin=$b; break; }
         done
         [ -n "$bin" ] || continue
-        out=$(timeout 45 runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$bin" hibernate "$1" 2>&1 | tail -1)
+        out=$(timeout 60 runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$bin" hibernate "$@" 2>&1 | tail -1)
         log "windows ($1, session $sid): ${out:-nothing to do}"
+        case $out in *"minimized "[1-9]*) MINIMIZED=1 ;; esac
     done
+}
+
+# The image would not fit: on the desktop (Chrome frees the memory of a
+# minimized window only while the desktop runs), minimize the windows and
+# wait; 0 if windows were minimized (then push and decide again).
+windows_rescue() {
+    local vt
+    vt=$(cat "$RUN_DIR/vt" 2>/dev/null)
+    say "Too much memory in use: minimizing the windows and waiting about 30 s ..."
+    [ -n "$PTTY" ] && [ -n "$vt" ] && timeout 5 chvt "$vt" 2>/dev/null
+    windows_hook before 30
+    [ -n "$PTTY" ] && [ -n "$vt" ] && timeout 5 chvt "$PROGRESS_VT" 2>/dev/null
+    [ "$MINIMIZED" = 1 ]
 }
 
 lid_closed() { grep -qs closed /proc/acpi/button/lid/*/state; }
@@ -581,10 +599,45 @@ $2"
     exit 1
 }
 
+# Push memory out to disk swap until "in use" is at or below the target;
+# sets used, gtt_end and vram_end (locals of do_pre).
+push_memory() {
+    local end last stalls step trace=""    # GPU memory along the way (DIAGNOSE=1)
+    [ "$DIAGNOSE" = 1 ] && trace="start: $(gpu_gtt)"
+    sync
+    echo 1 > /proc/sys/vm/drop_caches
+    [ "$DIAGNOSE" = 1 ] && trace="$trace, caches dropped: $(gpu_gtt)"
+
+    end=$(( SECONDS + MAX_SECONDS )); last=$(used_mib); stalls=0
+    while [ $SECONDS -lt $end ]; do
+        used=$(used_mib)
+        [ $used -le $TARGET ] && break
+        step=$(( used - TARGET )); [ $step -gt 1024 ] && step=1024
+        # Fails with EAGAIN when it frees less than asked; the loop retries.
+        echo "${step}M" > /sys/fs/cgroup/memory.reclaim 2>/dev/null
+        if [ $(( last - $(used_mib) )) -lt 32 ]; then
+            stalls=$(( stalls + 1 )); [ $stalls -ge 5 ] && break
+        else
+            stalls=0
+        fi
+        last=$(used_mib)
+        [ "$DIAGNOSE" = 1 ] && trace="$trace, in use $last: $(gpu_gtt)"
+        [ -n "$PTTY" ] && printf '\r     in RAM: %6d MiB   goal: %d MiB   ' "$last" "$TARGET" > "$PTTY" 2>/dev/null
+    done
+    say ""
+    used=$(used_mib)
+    log "in use after pushing to disk: ${used} MiB (target ${TARGET} MiB)"
+    [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU GTT (MiB) after $trace"
+    [ "$DIAGNOSE" = 1 ] && diagnose_memory
+    mkdir -p "$RUN_DIR"
+    echo "$used" > "$RUN_DIR/left"
+    gtt_end=$(gpu_gtt); vram_end=$(gpu_vram)
+    echo "$gtt_end $vram_end" > "$RUN_DIR/gpu"
+}
+
 do_pre() {
     local used zram swap_size swap_used swap_free push image_disk need suggest
-    local end last stalls step gpu_start gtt_end vram_end runs off res safe predicted
-    windows_hook before                    # while the desktop still draws: minimized windows free their memory
+    local gpu_start gtt_end vram_end runs off res safe predicted
     gpu_start=$(gpu_mem)                   # before the progress screen takes over
     progress_start
     [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU memory at the start: ${gpu_start}after the screen switch: $(gpu_mem)"
@@ -618,38 +671,8 @@ do_pre() {
     echo $(( TARGET * 1048576 )) > /sys/power/image_size
 
     zram_off || cancel "Could not turn off zram swap." "See $LOG."
-    local trace=""                         # GPU memory along the way (DIAGNOSE=1)
-    [ "$DIAGNOSE" = 1 ] && trace="zram off: $(gpu_gtt)"
-    sync
-    echo 1 > /proc/sys/vm/drop_caches
-    [ "$DIAGNOSE" = 1 ] && trace="$trace, caches dropped: $(gpu_gtt)"
 
-    # Push memory out to disk swap until "in use" is at or below the target.
-    end=$(( SECONDS + MAX_SECONDS )); last=$(used_mib); stalls=0
-    while [ $SECONDS -lt $end ]; do
-        used=$(used_mib)
-        [ $used -le $TARGET ] && break
-        step=$(( used - TARGET )); [ $step -gt 1024 ] && step=1024
-        # Fails with EAGAIN when it frees less than asked; the loop retries.
-        echo "${step}M" > /sys/fs/cgroup/memory.reclaim 2>/dev/null
-        if [ $(( last - $(used_mib) )) -lt 32 ]; then
-            stalls=$(( stalls + 1 )); [ $stalls -ge 5 ] && break
-        else
-            stalls=0
-        fi
-        last=$(used_mib)
-        [ "$DIAGNOSE" = 1 ] && trace="$trace, in use $last: $(gpu_gtt)"
-        [ -n "$PTTY" ] && printf '\r     in RAM: %6d MiB   goal: %d MiB   ' "$last" "$TARGET" > "$PTTY" 2>/dev/null
-    done
-    say ""
-    used=$(used_mib)
-    log "in use after pushing to disk: ${used} MiB (target ${TARGET} MiB)"
-    [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU GTT (MiB) after $trace"
-    [ "$DIAGNOSE" = 1 ] && diagnose_memory
-    mkdir -p "$RUN_DIR"
-    echo "$used" > "$RUN_DIR/left"
-    gtt_end=$(gpu_gtt); vram_end=$(gpu_vram)
-    echo "$gtt_end $vram_end" > "$RUN_DIR/gpu"
+    push_memory
 
     # Not reaching TARGET is normal: kernel, driver and desktop memory cannot
     # be swapped out and varies a few hundred MiB between attempts.
@@ -661,6 +684,15 @@ do_pre() {
         log "decision by the memory model ($runs runs): needed about ${predicted} MiB" \
             "(left ${used} + ${off} + GPU ${gtt_end}+${vram_end} + ${res} + margin ${MODEL_MARGIN_MIB})," \
             "largest that worked ${safe} MiB"
+        if [ $predicted -gt $safe ] && windows_rescue; then
+            say "1/2  Moving memory to the swap on disk again"
+            # most is on disk already; at most 60 s, so all of "pre" stays
+            # within the service's 300 s (120 + up to 60 for the windows + 60)
+            MAX_SECONDS=60 push_memory
+            predicted=$(( used + off + gtt_end + vram_end + res + MODEL_MARGIN_MIB ))
+            log "decision after minimizing the windows: needed about ${predicted} MiB" \
+                "(left ${used} + GPU ${gtt_end}+${vram_end}), largest that worked ${safe} MiB"
+        fi
         [ $predicted -le $safe ] || cancel \
             "The image would need about ${predicted} MiB, more than has ever worked here (${safe} MiB)." \
             "What is left cannot be swapped out (kernel, GPU drivers, desktop). Close windows (above all video and big windows on large screens) and try again."

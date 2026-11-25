@@ -390,10 +390,19 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   with a playing video moved): +235 MiB on the built-in screen, +305 on the
   4K monitor, +520 maximized there, +110..190 on the 1080p monitor; the
   NVIDIA card stayed at 200 MiB. Minimized, the window gave back all but
-  about 50 MiB within 10 s. So `hibernate-prepare` now asks
-  plasma-reopen-windows (when a user has it) to minimize the shown windows
-  before it measures anything, and to show them again after waking or
-  cancelling (`hibernate before` / `after`; that app's setting decides).
+  about 50 MiB within 10 s.
+- Measured again with the windows minimized by script (one video window
+  playing, maximized on the 4K screen): nothing for about 20 s, then one
+  step of about 100 MiB (21 s; 26 s when all windows were minimized). With
+  all windows minimized the desktop behind them first cost about 45 MiB, so
+  the net gain was about 70 MiB. The first numbers above included the
+  video's own memory swinging by +-150 MiB.
+- So the windows are minimized only when the model would refuse: back on
+  the desktop, plasma-reopen-windows minimizes them and waits at least 30 s,
+  then memory is pushed again (at most 60 s, to stay within the service's
+  300 s) and the decision is made again. They are shown again after waking
+  or cancelling (`hibernate before 30` / `after`; that app's setting
+  decides).
 
 ## Measurements
 
