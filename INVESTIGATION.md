@@ -374,7 +374,8 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   attempt, and after waking the slowest devices and driver warnings; the
   history gets "left in RAM" and the kernel's "available pages", and
   `status` computes the largest safe "left in RAM" from them.
-- 2026-11-25, after the kernel 7.3.4 / NVIDIA 620.70 update: one attempt was
+- 2026-11-25 (kernel 7.2.9, NVIDIA 615.71: an update to 7.3.4 / 620.70 that
+  morning had failed for lack of space on /boot, so nothing had changed): one attempt was
   refused by the model (about 7780 MiB needed, above 7642; Radeon GTT 2353
   MiB at the start), the next one after closing apps and moving windows
   worked (6155 MiB, GTT 1167). KWin draws every screen on the Radeon, the

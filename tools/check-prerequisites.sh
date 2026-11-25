@@ -58,7 +58,10 @@ if grep -qw 'resume=[^ ]*' /proc/cmdline; then
 else
     warn "no resume= on the kernel command line; systemd can resume without it on UEFI, but resume= is more reliable"
 fi
-if lsinitrd -m 2>/dev/null | grep -qx resume; then
+if ! command -v lsinitrd >/dev/null; then
+    # not dracut (Ubuntu/Debian: initramfs-tools, Arch: mkinitcpio): cannot look inside
+    warn "cannot check the initramfs here (no dracut); make sure it resumes (README: On other distributions)"
+elif lsinitrd -m 2>/dev/null | grep -qx resume; then
     ok "initramfs contains the dracut 'resume' module"
 else
     fail "initramfs has no 'resume' module"

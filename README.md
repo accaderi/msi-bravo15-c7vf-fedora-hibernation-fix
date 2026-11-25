@@ -39,7 +39,7 @@ working, self-adjusting hibernation.
 2. [Will it work on my computer?](#will-it-work-on-my-computer)
 3. [The basics: what goes wrong](#the-basics-what-goes-wrong)
 4. [Hibernation or Save & Shut Down?](#hibernation-or-save--shut-down)
-5. [Prerequisites](#prerequisites), steps 1–5
+5. [Prerequisites](#prerequisites), steps 1–5, [on other distributions](#on-other-distributions)
 6. [Install](#install)
 7. [Check that it works](#check-that-it-works)
 8. [Daily use](#daily-use)
@@ -93,7 +93,7 @@ machine it runs on. What is general and what was made for this laptop:
 | `HibernateMode=platform` | installed everywhere | right for most machines; a few need `shutdown` (which hangs on this laptop) |
 | NVIDIA driver options (Prerequisites, step 5) | done by hand, only with NVIDIA | not needed without NVIDIA |
 | SELinux rule for the NVIDIA driver | installed on any system with SELinux | harmless without NVIDIA; the installer gets `checkpolicy` with `dnf` (Fedora family) |
-| Swap, `resume=`, Secure Boot (Prerequisites) | written for Fedora | other distributions do these their own way; with Secure Boot on, most kernels refuse hibernation |
+| Swap, `resume=`, Secure Boot (Prerequisites) | written for Fedora | other distributions do these their own way: see [On other distributions](#on-other-distributions); with Secure Boot on, most kernels refuse hibernation |
 | Desktop | any (GNOME, KDE, ...): the progress screen is a text console | the same. Minimizing windows when memory is tight needs [plasma-reopen-windows](https://github.com/accaderi/plasma-reopen-windows) (KDE Plasma) |
 
 ---
@@ -316,6 +316,42 @@ grep -E 'Preserve|TemporaryFile|UseKernelSuspend' /proc/driver/nvidia/params
   RTX 4060).
 - With the **closed** NVIDIA modules, leave out `NVreg_UseKernelSuspendNotifiers=1`;
   the three services do the work instead. Not tested.
+
+### On other distributions
+
+The steps above are written for Fedora. The script itself does not depend on
+the distribution; what differs is how the system is made ready to hibernate.
+Not tested anywhere but Fedora, so treat this as a guide:
+
+- **Swap on disk, at least as big as RAM** (step 2). Fedora has only zram;
+  Ubuntu usually has a small swap *file* (about 2 GB), too small. A swap
+  partition is simplest. A swap file also works for the kernel, but then it
+  needs `resume_offset=` (where the image starts in the file), and
+  hibernate-prepare was only tested with a partition.
+- **Resume at boot** (step 3): the initramfs, the small system that runs
+  before the real one, must look into the swap and load the image.
+  - Fedora (dracut): included.
+  - Ubuntu / Debian (initramfs-tools): put `RESUME=UUID=<swap uuid>` in
+    `/etc/initramfs-tools/conf.d/resume`, then `sudo update-initramfs -u`.
+  - Arch (mkinitcpio): add the `resume` hook after `filesystems` in
+    `/etc/mkinitcpio.conf` (not needed with the `systemd` hook), then
+    `sudo mkinitcpio -P`.
+  - With systemd 255 or newer on a UEFI computer, the swap is often found
+    without `resume=`; `resume=UUID=<swap uuid>` on the kernel command line
+    is still the safe choice.
+  - An encrypted swap must be unlocked by the initramfs before it resumes.
+- **Secure Boot off** (step 4): the same everywhere. With Secure Boot on, the
+  kernels of Fedora, Ubuntu, Debian and most others refuse to hibernate.
+- **A Hibernate entry:** KDE shows it once hibernation works. GNOME hides it;
+  use an extension or `systemctl hibernate`.
+- **Nothing forbids it** (step 1): no `AllowHibernation=no` in systemd's
+  settings.
+- **Installing:** `install.sh` uses `dnf` only to build the SELinux rule on
+  systems with SELinux; Debian, Ubuntu and Arch normally have none, so that
+  step is skipped. `tools/check-prerequisites.sh` cannot look inside a
+  non-dracut initramfs and only warns about it.
+- **NVIDIA** (step 5): the same driver options; how to set them (modprobe
+  files, rebuilding the initramfs) follows your distribution.
 
 ---
 
