@@ -36,16 +36,17 @@ working, self-adjusting hibernation.
 ## Contents
 
 1. [Tested on](#tested-on)
-2. [The basics: what goes wrong](#the-basics-what-goes-wrong)
-3. [Hibernation or Save & Shut Down?](#hibernation-or-save--shut-down)
-4. [Prerequisites](#prerequisites), steps 1–5
-5. [Install](#install)
-6. [Check that it works](#check-that-it-works)
-7. [Daily use](#daily-use)
-8. [Settings](#settings)
-9. [Troubleshooting](#troubleshooting)
-10. [Uninstall](#uninstall)
-11. [License](#license)
+2. [Will it work on my computer?](#will-it-work-on-my-computer)
+3. [The basics: what goes wrong](#the-basics-what-goes-wrong)
+4. [Hibernation or Save & Shut Down?](#hibernation-or-save--shut-down)
+5. [Prerequisites](#prerequisites), steps 1–5
+6. [Install](#install)
+7. [Check that it works](#check-that-it-works)
+8. [Daily use](#daily-use)
+9. [Settings](#settings)
+10. [Troubleshooting](#troubleshooting)
+11. [Uninstall](#uninstall)
+12. [License](#license)
 
 ---
 
@@ -77,6 +78,23 @@ off. Before the power-button fix, 5 of 5 power-button hibernations failed; see
 Secure Boot on, the closed-source NVIDIA modules, and other laptop models. The
 script computes everything from the machine it runs on, so it should work on
 those too, but nobody has confirmed it yet. Reports are welcome.
+
+## Will it work on my computer?
+
+The script itself is plain bash for any Linux with systemd; it measures the
+machine it runs on. What is general and what was made for this laptop:
+
+| Part | Where it applies | On other hardware |
+|---|---|---|
+| Moving memory to disk before hibernating, the learned memory model, a clear reason when it cancels, the progress screen, the log | any Linux with systemd, a disk swap and kernel 5.19 or newer (it uses `memory.reclaim`) | the same; it learns that machine's numbers |
+| Turning zram off and on again | where zram is used (Fedora's default) | skipped without zram |
+| Graphics memory in the decision | AMD (read from the driver) and NVIDIA (`nvidia-smi`) are measured | Intel graphics are not measured directly; the learned growth covers them |
+| Power button and built-in keyboard disconnected while the image is written; USB and touchpad wake-up off | made for this laptop's controller, which sends stray key events at power-off | **not skipped:** runs on any machine that has these devices (most laptops). Harmless there; switch it off with `DETACH_POWER_BUTTON=0`, `DETACH_KEYBOARD=0`, `NO_INPUT_WAKEUP=0` |
+| `HibernateMode=platform` | installed everywhere | right for most machines; a few need `shutdown` (which hangs on this laptop) |
+| NVIDIA driver options (Prerequisites, step 5) | done by hand, only with NVIDIA | not needed without NVIDIA |
+| SELinux rule for the NVIDIA driver | installed on any system with SELinux | harmless without NVIDIA; the installer gets `checkpolicy` with `dnf` (Fedora family) |
+| Swap, `resume=`, Secure Boot (Prerequisites) | written for Fedora | other distributions do these their own way; with Secure Boot on, most kernels refuse hibernation |
+| Desktop | any (GNOME, KDE, ...): the progress screen is a text console | the same. Minimizing windows when memory is tight needs [plasma-reopen-windows](https://github.com/accaderi/plasma-reopen-windows) (KDE Plasma) |
 
 ---
 
