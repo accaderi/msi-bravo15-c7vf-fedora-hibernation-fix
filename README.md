@@ -400,10 +400,11 @@ heaviest GPU app open, for example a video editor with a project loaded.
   [plasma-reopen-windows](https://github.com/accaderi/plasma-reopen-windows)
   (KDE Plasma), the windows are minimized first: what a window shows is
   graphics memory that stays in RAM, and a minimized playing video gives back
-  about 100 MiB after 20-30 s. The desktop is shown for that half minute,
-  then memory is moved to disk again and the decision is made again. The
-  windows come back after waking. Switch it off in that app (Overview,
-  Hibernation). Without it, nothing changes.
+  about 100 MiB after 20-30 s. The desktop is shown while it waits (15-60 s,
+  set in that app), then memory is moved to disk again and the decision is
+  made again. The windows come back after waking. It is off by default:
+  switch it on in that app (Overview, Hibernation). Without it, nothing
+  changes.
 - **More RAM later:** nothing to change. The script reads the RAM size every
   time. With 32 GB, about 11 GB can stay in RAM instead of 3 GB, and the swap
   should grow to about 40 GB (RAM + 25 %).

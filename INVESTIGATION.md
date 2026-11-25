@@ -398,11 +398,11 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   the net gain was about 70 MiB. The first numbers above included the
   video's own memory swinging by +-150 MiB.
 - So the windows are minimized only when the model would refuse: back on
-  the desktop, plasma-reopen-windows minimizes them and waits at least 30 s,
-  then memory is pushed again (at most 60 s, to stay within the service's
-  300 s) and the decision is made again. They are shown again after waking
-  or cancelling (`hibernate before 30` / `after`; that app's setting
-  decides).
+  the desktop, plasma-reopen-windows minimizes them and waits (its setting,
+  15-60 s, default 30; off by default), then memory is pushed again (at most
+  60 s, to stay within the service's 300 s) and the decision is made again.
+  They are shown again after waking or cancelling (`hibernate before` /
+  `after`).
 
 ## Measurements
 

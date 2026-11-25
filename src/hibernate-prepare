@@ -314,7 +314,7 @@ windows_hook() {
             [ -x "$b" ] && { bin=$b; break; }
         done
         [ -n "$bin" ] || continue
-        out=$(timeout 60 runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+        out=$(timeout 90 runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$bin" hibernate "$@" 2>&1 | tail -1)
         log "windows ($1, session $sid): ${out:-nothing to do}"
         case $out in *"minimized "[1-9]*) MINIMIZED=1 ;; esac
@@ -327,9 +327,9 @@ windows_hook() {
 windows_rescue() {
     local vt
     vt=$(cat "$RUN_DIR/vt" 2>/dev/null)
-    say "Too much memory in use: minimizing the windows and waiting about 30 s ..."
+    say "Too much memory in use: minimizing the windows and waiting (up to about a minute) ..."
     [ -n "$PTTY" ] && [ -n "$vt" ] && timeout 5 chvt "$vt" 2>/dev/null
-    windows_hook before 30
+    windows_hook before                    # its setting hibernate_minimize_wait: 15-60 s, +10 if still shrinking
     [ -n "$PTTY" ] && [ -n "$vt" ] && timeout 5 chvt "$PROGRESS_VT" 2>/dev/null
     [ "$MINIMIZED" = 1 ]
 }
@@ -687,7 +687,7 @@ do_pre() {
         if [ $predicted -gt $safe ] && windows_rescue; then
             say "1/2  Moving memory to the swap on disk again"
             # most is on disk already; at most 60 s, so all of "pre" stays
-            # within the service's 300 s (120 + up to 60 for the windows + 60)
+            # within the service's 300 s (120 + up to 90 for the windows + 60)
             MAX_SECONDS=60 push_memory
             predicted=$(( used + off + gtt_end + vram_end + res + MODEL_MARGIN_MIB ))
             log "decision after minimizing the windows: needed about ${predicted} MiB" \
