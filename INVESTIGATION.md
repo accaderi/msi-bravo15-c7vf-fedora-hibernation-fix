@@ -386,6 +386,14 @@ hibernating. Settings: `DETACH_POWER_BUTTON`, `DETACH_KEYBOARD`,
   kernel memory, so a failing `setfont` would explain the small letters.
   `DIAGNOSE=1` now logs the font result, the text screen size and
   VmallocUsed when the progress screen starts.
+- Measured the same day (Radeon GTT every second while one Chrome window
+  with a playing video moved): +235 MiB on the built-in screen, +305 on the
+  4K monitor, +520 maximized there, +110..190 on the 1080p monitor; the
+  NVIDIA card stayed at 200 MiB. Minimized, the window gave back all but
+  about 50 MiB within 10 s. So `hibernate-prepare` now asks
+  plasma-reopen-windows (when a user has it) to minimize the shown windows
+  before it measures anything, and to show them again after waking or
+  cancelling (`hibernate before` / `after`; that app's setting decides).
 
 ## Measurements
 

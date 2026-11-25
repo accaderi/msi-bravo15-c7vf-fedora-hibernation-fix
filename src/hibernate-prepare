@@ -293,6 +293,29 @@ in_sessions() {
     done
 }
 
+# plasma-reopen-windows, where a user has it: "before" minimizes the shown
+# windows so the graphics memory they hold in RAM is freed (a maximized video
+# on a 4K screen: about 300 MiB on the Radeon, measured), "after" shows them
+# again. Its own setting (hibernate_minimize) decides; without it, nothing.
+windows_hook() {
+    local sid user uid home bin b out
+    for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+        case $(loginctl show-session "$sid" -p Type --value) in wayland|x11) ;; *) continue ;; esac
+        user=$(loginctl show-session "$sid" -p Name --value)
+        uid=$(id -u "$user" 2>/dev/null) || continue
+        home=$(getent passwd "$user" | cut -d: -f6)
+        bin=""
+        for b in "$home/.local/bin/plasma-reopen-windows" /usr/local/bin/plasma-reopen-windows \
+                 /usr/bin/plasma-reopen-windows; do
+            [ -x "$b" ] && { bin=$b; break; }
+        done
+        [ -n "$bin" ] || continue
+        out=$(timeout 45 runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$bin" hibernate "$1" 2>&1 | tail -1)
+        log "windows ($1, session $sid): ${out:-nothing to do}"
+    done
+}
+
 lid_closed() { grep -qs closed /proc/acpi/button/lid/*/state; }
 
 # Before: remember a closed lid. After: lid open again but the built-in
@@ -551,6 +574,7 @@ cancel() {
     log "CANCELLED: $1 - $2"
     [ -n "$PTTY" ] && sleep 5      # let the reason be read on the progress screen
     progress_end
+    windows_hook after
     zram_on
     notify_users "Hibernation cancelled" "$1
 $2"
@@ -560,6 +584,7 @@ $2"
 do_pre() {
     local used zram swap_size swap_used swap_free push image_disk need suggest
     local end last stalls step gpu_start gtt_end vram_end runs off res safe predicted
+    windows_hook before                    # while the desktop still draws: minimized windows free their memory
     gpu_start=$(gpu_mem)                   # before the progress screen takes over
     progress_start
     [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU memory at the start: ${gpu_start}after the screen switch: $(gpu_mem)"
@@ -701,6 +726,7 @@ do_post() {
     inputs_attach         # first: keyboard and power button back
     input_wakeup_on
     progress_end
+    windows_hook after    # the desktop is shown again: the minimized windows come back
     pm_debug_off
     modules_reload
     zram_on
