@@ -44,9 +44,10 @@ working, self-adjusting hibernation.
 7. [Check that it works](#check-that-it-works)
 8. [Daily use](#daily-use)
 9. [Settings](#settings)
-10. [Troubleshooting](#troubleshooting)
-11. [Uninstall](#uninstall)
-12. [License](#license)
+10. [After a kernel or driver update](#after-a-kernel-or-driver-update)
+11. [Troubleshooting](#troubleshooting)
+12. [Uninstall](#uninstall)
+13. [License](#license)
 
 ---
 
@@ -63,7 +64,7 @@ working, self-adjusting hibernation.
 | Swap | 20 GB swap partition on that SSD, plus Fedora's default 8 GB zram |
 | Wi-Fi | MediaTek MT7921K (RZ608), Wi-Fi 6E |
 | System | Fedora 44 KDE Plasma 6.7 (Wayland), kernel 7.2.9, systemd 259, ext4 root, SELinux enforcing |
-| NVIDIA driver | 615.71.09 *open* kernel modules (RPM Fusion `akmod-nvidia`) |
+| NVIDIA driver | 615.71.09 *open* kernel modules (RPM Fusion `akmod-nvidia`); since 2026-11-26 620.73.04 |
 | Secure Boot | off |
 
 Tested 2026-11-20 to 2026-11-22 with the final setup: 4 test hibernations
@@ -73,6 +74,13 @@ had about 12 GB of RAM in use, and one was resumed after almost a day powered
 off. Before the power-button fix, 5 of 5 power-button hibernations failed; see
 [Power button and lid](#power-button-and-lid). Measurements are in
 [INVESTIGATION.md](INVESTIGATION.md#measurements).
+
+**After the update of 2026-11-25** (kernel 7.3.4, NVIDIA 620.70.06)
+hibernation broke: with NVIDIA 620.70 it hung while putting the devices to
+sleep, with 620.73.04 it went into hibernation but hung at every resume on
+kernel 7.3.4. Kernel 7.2.9 with NVIDIA 620.73.04 works again. How this was
+found, and how to try each new kernel safely:
+[After a kernel or driver update](#after-a-kernel-or-driver-update).
 
 **Not tested:** other RAM sizes, swap files (only a swap partition), btrfs,
 Secure Boot on, the closed-source NVIDIA modules, and other laptop models. The
@@ -615,6 +623,77 @@ script ignores it and continues. To turn it off: `PROGRESS=0` in
 
 ---
 
+## After a kernel or driver update
+
+Hibernation depends on every driver putting its device to sleep and waking
+it again, so a kernel or graphics driver update can break it, also on a
+computer where it worked for months. On the laptop this was developed on, the
+update of 2026-11-25 did exactly that (see [Tested on](#tested-on)). Nothing
+in this repo can fix a driver that hangs; what helps is never to depend on an
+untested kernel.
+
+**Keep a kernel that works, and try new ones next to it** (Fedora):
+
+```bash
+# new kernels do not become the one that starts
+sudo sed -i 's/^UPDATEDEFAULT=yes/UPDATEDEFAULT=no/' /etc/sysconfig/kernel
+# the kernel running now (that hibernates) starts
+sudo grubby --set-default /boot/vmlinuz-$(uname -r)
+```
+
+and in `/etc/dnf/dnf.conf` set `installonly_limit=3`: dnf keeps that many
+kernels and removes the oldest (never the running one), so a new kernel does
+not push the working one out. Each kernel takes about 210 MB of `/boot`;
+`df -h /boot` shows the room.
+
+**Trying a new kernel:**
+
+1. Save your work. Restart and choose the new kernel in the boot menu (hold
+   Shift or press Esc while starting if the menu is hidden).
+2. `sudo hibernate-prepare calibrate`: a whole hibernation that restores at
+   once instead of powering off.
+3. One real hibernation from the start menu. When powering on, **choose the
+   same new kernel again**: an image is resumed only by the kernel that wrote
+   it; another kernel ignores it and starts fresh.
+4. Both worked: make it the one that starts,
+   `sudo grubby --set-default /boot/vmlinuz-<version>`.
+   One of them hung: long-press the power button, start the old kernel
+   (nothing changed there), and wait for the next kernel.
+
+Step 3 matters: on 2026-11-26 `calibrate` passed on kernel 7.3.4, but every
+real hibernation hung while resuming. `calibrate` does not power off, so the
+graphics cards never start cold.
+
+With [plasma-reopen-windows](https://github.com/accaderi/plasma-reopen-windows)
+installed, a notification at login says when a new kernel has been installed
+(with these steps), its Save & Update & Restart never removes a kernel while
+`UPDATEDEFAULT=no`, and every hibernation first saves the open windows: a
+hang loses nothing that was open.
+
+**Finding what hangs** (for a bug report, or to choose what to roll back):
+
+- `calibrate` with the external monitors unplugged. On this laptop the
+  monitors are wired to the NVIDIA card; without them it hardly takes part.
+  Passing then points at the NVIDIA driver, hanging at the kernel or the
+  built-in graphics. Here: it passed unplugged and hung plugged in, and the
+  next NVIDIA release (620.73.04) fixed that part.
+- An older kernel with the new driver (`sudo akmods --kernels <old version>
+  --force` builds the NVIDIA module for it). Here: 7.2.9 with 620.73.04
+  resumed, 7.3.4 did not, so the kernel was the cause of the resume hang.
+- To see where it stops: `sudo grubby --update-kernel=ALL
+  --args="no_console_suspend"` keeps kernel messages on the screen while the
+  devices sleep, with each device's start and end (this repo turns that on
+  with `DIAGNOSE=1`). Photograph the screen when it hangs. The screen itself
+  stops when the built-in graphics go to sleep, so the last line is where the
+  picture ends, not always what hangs. Remove it afterwards with
+  `--remove-args="no_console_suspend"`.
+
+**Removing a kernel** with the NVIDIA driver from RPM Fusion: dnf may want to
+remove `akmod-nvidia` with it (it needs the newest kernel's development
+files). If `akmod-nvidia` is in the list, answer N: without it, new kernels
+get no NVIDIA driver. Remove an old kernel only once a newer one is
+installed.
+
 ## Troubleshooting
 
 | What you see | Likely cause | What to do |
@@ -630,6 +709,7 @@ script ignores it and continues. To turn it off: `PROGRESS=0` in
 | Built-in keyboard or power button dead after waking | reconnecting it failed (log: `could not reconnect`) | restart, or `echo i8042 \| sudo tee /sys/bus/platform/drivers/i8042/bind` (keyboard), `echo PNP0C0C:00 \| sudo tee /sys/bus/platform/drivers/acpi-button/bind` (power button); if it happens again, set `DETACH_KEYBOARD=0` / `DETACH_POWER_BUTTON=0` and hibernate from the start menu |
 | Power button set to Hibernate does nothing | KDE's power management (PowerDevil) gets the key but ignores it; seen after a log-out screen had been left open in the background (`plasma-shutdown` and `ksmserver-logout-greeter` still running) | `systemctl --user restart plasma-powerdevil.service`, or log out and back in |
 | Power button light orange instead of white | not a fault: on MSI laptops the light is white when only the built-in AMD graphics run and orange when the NVIDIA card is on. The HDMI and USB-C display outputs are wired to the NVIDIA card, so with an external monitor plugged in it is always orange (already from the end of the MSI logo) | nothing to do; unplug the external monitors and it turns white |
+| Hung while hibernating or while resuming, after a kernel or NVIDIA driver update, when it worked before | a driver that does not sleep or wake properly | start the previous kernel (boot menu) and keep it as the default; see [After a kernel or driver update](#after-a-kernel-or-driver-update) |
 | Wi-Fi missing after waking | driver did not reinitialize | `sudo modprobe -r mt7921e && sudo modprobe mt7921e`; if it happens often, set `UNLOAD_MODULES="mt7921e"` |
 
 Tests that find which stage fails:
