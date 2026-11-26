@@ -110,7 +110,9 @@ leds_restore() {
     local led trig
     [ -r "$RUN_DIR/leds" ] || return 0
     while read -r led trig; do
-        echo "$trig" > "$led/trigger" 2>/dev/null
+        # the keyboard is reconnected after waking under a new name: its old
+        # light is gone, and the new one has its normal setting already
+        [ -w "$led/trigger" ] && echo "$trig" > "$led/trigger" 2>/dev/null
     done < "$RUN_DIR/leds"
     rm -f "$RUN_DIR/leds"
 }
