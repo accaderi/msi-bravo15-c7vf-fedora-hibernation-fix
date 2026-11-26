@@ -638,6 +638,11 @@ push_memory() {
 do_pre() {
     local used zram swap_size swap_used swap_free push image_disk need suggest
     local gpu_start gtt_end vram_end runs off res safe predicted
+    # Reopen Windows (if installed) saves the open windows first: should the
+    # hibernation or the resume fail, its autosave offered at the next login
+    # is what was open just now (measured 2026-11-25: the newest autosave was
+    # 20 minutes old and missed the apps opened since)
+    windows_hook save
     gpu_start=$(gpu_mem)                   # before the progress screen takes over
     progress_start
     [ "$DIAGNOSE" = 1 ] && log "diagnose: GPU memory at the start: ${gpu_start}after the screen switch: $(gpu_mem)"

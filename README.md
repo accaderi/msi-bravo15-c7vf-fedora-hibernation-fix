@@ -193,6 +193,10 @@ refused, Save & Shut Down.
 
 Save & Shut Down / Restart for KDE Plasma:
 [plasma-reopen-windows](https://github.com/accaderi/plasma-reopen-windows).
+With it installed, every hibernation first has it save the open windows
+(into its newest autosave, in a fraction of a second): should the
+hibernation or the resume fail, the autosave it offers at the next login is
+what was open a moment before.
 
 ---
 
