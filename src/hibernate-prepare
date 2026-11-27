@@ -56,6 +56,8 @@ SCREEN_ON_AFTER_LID=1     # hibernated with the lid closed and woken with it
                           # open: switch the built-in screen back on (the
                           # desktop turns it off on closing and may not
                           # turn it on again)
+SCREENS_ON_AFTER_WAKE=1   # after waking, switch on screens the desktop left off
+                          # (seen: dark until a key was pressed)
 MODEL_RUNS=3              # runs with GPU memory recorded before the learned
                           # memory model decides instead of the fixed allowance
 MODEL_MARGIN_MIB=128      # added to the model's prediction (it once came out
@@ -285,12 +287,15 @@ notify_users() {
 
 # Run a command in each graphical session, as its user
 in_sessions() {
-    local sid user uid
+    local sid user uid wl
     for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
         case $(loginctl show-session "$sid" -p Type --value) in wayland|x11) ;; *) continue ;; esac
         user=$(loginctl show-session "$sid" -p Name --value)
         uid=$(id -u "$user" 2>/dev/null) || continue
-        runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+        # the desktop's display socket: not always wayland-0 (measured:
+        # wayland-1 on Plasma 6.7, and kscreen-doctor then reached nothing)
+        wl=$(find "/run/user/$uid" -maxdepth 1 -name 'wayland-*' -type s -printf '%f\n' 2>/dev/null | sort | head -1)
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" ${wl:+WAYLAND_DISPLAY="$wl"} \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
     done
 }
@@ -361,6 +366,29 @@ screen_on_after_lid() {
             log "built-in screen $out switched back on (lid was closed when hibernating)"
         return 0
     done
+}
+
+# After waking, the screens sometimes stayed dark until a key was pressed
+# (2026-11-26, NVIDIA 620.73 + kernel 7.2.9): switch any screen the desktop
+# reports as off back on, and log what it reported.
+screens_wake() {
+    local i state
+    [ "$SCREENS_ON_AFTER_WAKE" = 1 ] || return 0
+    command -v kscreen-doctor >/dev/null || return 0
+    for i in 1 2 3 4 5; do                  # the desktop needs a moment after waking
+        sleep 1
+        state=$(in_sessions timeout 5 kscreen-doctor --dpms show 2>/dev/null |
+                sed -n 's/^dpms mode for screen \(.*\): \(.*\)$/\1 \2/p' | tr '\n' ' ')
+        [ -n "$state" ] || continue
+        case " $state" in
+            *" off"*)
+                in_sessions timeout 5 kscreen-doctor --dpms on >/dev/null 2>&1
+                log "screens after waking: $state-> switched on"
+                return 0 ;;
+        esac
+        [ $i -ge 2 ] && { log "screens after waking: $state"; return 0; }
+    done
+    log "screens after waking: the desktop did not answer"
 }
 
 zram_off() {
@@ -771,6 +799,7 @@ do_post() {
     zram_on
     learn
     screen_on_after_lid
+    screens_wake
 }
 
 do_calibrate() {
