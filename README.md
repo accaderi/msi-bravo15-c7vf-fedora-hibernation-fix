@@ -63,7 +63,7 @@ working, self-adjusting hibernation.
 | Disk | 1 TB NVMe SSD (Micron 2400), dual boot with Windows |
 | Swap | 20 GB swap partition on that SSD, plus Fedora's default 8 GB zram |
 | Wi-Fi | MediaTek MT7921K (RZ608), Wi-Fi 6E |
-| System | Fedora 44 KDE Plasma 6.7 (Wayland), kernel 7.2.9, systemd 259, ext4 root, SELinux enforcing |
+| System | Fedora 44 KDE Plasma 6.7 (Wayland), kernel 7.2.9; since 2026-11-27 7.3.6, systemd 259, ext4 root, SELinux enforcing |
 | NVIDIA driver | 615.71.09 *open* kernel modules (RPM Fusion `akmod-nvidia`); since 2026-11-26 620.73.04 |
 | Secure Boot | off |
 
@@ -78,8 +78,10 @@ off. Before the power-button fix, 5 of 5 power-button hibernations failed; see
 **After the update of 2026-11-25** (kernel 7.3.4, NVIDIA 620.70.06)
 hibernation broke: with NVIDIA 620.70 it hung while putting the devices to
 sleep, with 620.73.04 it went into hibernation but hung at every resume on
-kernel 7.3.4. Kernel 7.2.9 with NVIDIA 620.73.04 works again. How this was
-found, and how to try each new kernel safely:
+kernel 7.3.4. Kernel 7.2.9 with NVIDIA 620.73.04 works again, and so does
+kernel 7.3.6 (2026-11-27: `calibrate` and a real hibernation passed; it is
+now the one that starts, 7.2.9 is kept as a fallback, 7.3.4 removed). How
+this was found, and how to try each new kernel safely:
 [After a kernel or driver update](#after-a-kernel-or-driver-update).
 
 **Not tested:** other RAM sizes, swap files (only a swap partition), btrfs,
@@ -412,12 +414,19 @@ heaviest GPU app open, for example a video editor with a project loaded.
 
    | Phase | Screen | Caps Lock light | Time (16 GB, tested) |
    |---|---|---|---|
-   | Memory pushed to disk | "HIBERNATING", memory counting down | blinks | 10–30 s |
+   | Memory pushed to disk | "HIBERNATING", memory counting down | blinks | a few seconds to 30 s |
    | Kernel freezes everything, makes the copy, writes it | kernel messages, then black; fans may run | stops (built-in keyboard disconnected) | 30–90 s |
    | Power-off | off | off | |
 
    Nothing changing for more than **3 minutes** means it is stuck; see
    [Troubleshooting](#troubleshooting).
+
+   Watch the screen and the power-off, not the Caps Lock light. The light
+   only blinks while memory is pushed to disk; with little memory in use
+   that is over in a few seconds (measured: 8 s with 8 GB in use), and it is
+   dark for the whole rest of the hibernation. A light that hardly blinked,
+   or did not blink at all (an external keyboard may not show it), says
+   nothing about whether the hibernation works.
 
    The screen stays black while the image is written, because the AMD driver
    does not wake the screen just before a power-off. With `DETACH_KEYBOARD=0`
@@ -612,6 +621,9 @@ On by default (`PROGRESS=1`):
   it stops when the kernel takes over, because the built-in keyboard is then
   disconnected; with `DETACH_KEYBOARD=0` it keeps blinking through the black
   phase.
+  It is a sign of life for the first step only: it can be over in a few
+  seconds, so do not use it to tell whether a hibernation is stuck (the
+  [phases above](#check-that-it-works) and the 3-minute rule are what count).
 - After waking up, or after a cancel, it switches back to the desktop and the
   light returns to normal Caps Lock behaviour.
 - During `calibrate`, the screen also wakes up while the image is written and
@@ -663,11 +675,13 @@ not push the working one out. Each kernel takes about 210 MB of `/boot`;
 
 Step 3 matters: on 2026-11-26 `calibrate` passed on kernel 7.3.4, but every
 real hibernation hung while resuming. `calibrate` does not power off, so the
-graphics cards never start cold.
+graphics cards never start cold. The next kernel, 7.3.6, passed both steps
+on 2026-11-27 and became the one that starts.
 
 With [plasma-reopen-windows](https://github.com/accaderi/plasma-reopen-windows)
-installed, a notification at login says when a new kernel has been installed
-(with these steps), its Save & Update & Restart never removes a kernel while
+installed, a notification at login says when a new kernel is available
+(Save & Update installs it next to the one that starts) and again when it
+has been installed (with these steps), its Save & Update & Restart never removes a kernel while
 `UPDATEDEFAULT=no`, and every hibernation first saves the open windows: a
 hang loses nothing that was open.
 
@@ -693,7 +707,17 @@ hang loses nothing that was open.
 remove `akmod-nvidia` with it (it needs the newest kernel's development
 files). If `akmod-nvidia` is in the list, answer N: without it, new kernels
 get no NVIDIA driver. Remove an old kernel only once a newer one is
-installed.
+installed. To see the list first without removing anything:
+
+```bash
+rpm -qa 'kernel*' | grep <version>                        # its packages
+dnf remove --assumeno $(rpm -qa 'kernel*' | grep <version>)   # what would go
+sudo dnf remove $(rpm -qa 'kernel*' | grep <version>)
+```
+
+`kmod-nvidia-<version>` going with it is right: that is the NVIDIA module
+built for that kernel only. Keep at least one older kernel that worked, to
+start when a new one breaks.
 
 ## Troubleshooting
 
